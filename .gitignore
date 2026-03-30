@@ -1,0 +1,32 @@
+# Go
+src/go-api/*.exe
+src/go-api/*.exe~
+src/go-api/*.dll
+src/go-api/*.so
+src/go-api/*.dylib
+src/go-api/*.test
+src/go-api/*.out
+src/go-api/main
+
+# Python
+src/python-client/__pycache__/
+src/python-client/*.py[cod]
+src/python-client/*$py.class
+src/python-client/*.so
+src/python-client/.Python
+src/python-client/venv/
+src/python-client/env/
+src/python-client/.env
+src/python-client/*.egg-info/
+src/python-client/dist/
+src/python-client/build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
