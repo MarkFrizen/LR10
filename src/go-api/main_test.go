@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,6 +14,7 @@ func init() {
 	// Инициализация для тестов
 	startTime = time.Now()
 	stats.StartTime = startTime.Format(time.RFC3339)
+	initSamplePosts()
 }
 
 // TestHealthHandler проверяет handler /health
@@ -405,5 +407,593 @@ func TestMainWithServer(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Ожидаемый статус код: %d, получен: %d", http.StatusOK, resp.StatusCode)
+	}
+}
+
+// ==================== ТЕСТЫ ДЛЯ POSTS HANDLER ====================
+
+// TestGetPostsHandler проверяет получение списка постов
+func TestGetPostsHandler(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/posts", nil)
+	w := httptest.NewRecorder()
+
+	postsHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Ожидаемый статус код: %d, получен: %d", http.StatusOK, w.Code)
+	}
+
+	var response GetPostsResponse
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
+	}
+
+	if response.Total == 0 {
+		t.Error("Ожидалось, что total > 0")
+	}
+	if response.Page != 1 {
+		t.Errorf("Ожидаемая страница: 1, получена: %d", response.Page)
+	}
+	if len(response.Posts) == 0 {
+		t.Error("Ожидалось, что posts не пустой")
+	}
+}
+
+// TestGetPostsHandlerWithPagination проверяет пагинацию
+func TestGetPostsHandlerWithPagination(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/posts?page=1&per_page=2", nil)
+	w := httptest.NewRecorder()
+
+	postsHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Ожидаемый статус код: %d, получен: %d", http.StatusOK, w.Code)
+	}
+
+	var response GetPostsResponse
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
+	}
+
+	if len(response.Posts) > 2 {
+		t.Errorf("Ожидалось не более 2 постов на странице, получено: %d", len(response.Posts))
+	}
+}
+
+// TestCreatePostHandler проверяет создание поста
+func TestCreatePostHandler(t *testing.T) {
+	createReq := CreatePostRequest{
+		Title:    "Тестовый пост",
+		Content:  "Содержимое тестового поста",
+		Excerpt:  "Краткое описание",
+		TagNames: []string{"Test", "Go"},
+	}
+
+	jsonBody, _ := json.Marshal(createReq)
+	req := httptest.NewRequest(http.MethodPost, "/api/posts", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	postsHandler(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("Ожидаемый статус код: %d, получен: %d", http.StatusCreated, w.Code)
+	}
+
+	var response CreatePostResponse
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
+	}
+
+	if response.Post.Title != createReq.Title {
+		t.Errorf("Ожидаемый заголовок: %s, получен: %s", createReq.Title, response.Post.Title)
+	}
+	if response.Post.Slug != "тестовый-пост" && response.Post.Slug != "testovyy-post" {
+		// Slug может быть транслитерирован или оставлен как есть
+		if response.Post.Slug == "" {
+			t.Error("Ожидался непустой slug")
+		}
+	}
+	if len(response.Post.Tags) != 2 {
+		t.Errorf("Ожидалось 2 тега, получено: %d", len(response.Post.Tags))
+	}
+	if response.Message != "Post created successfully" {
+		t.Errorf("Ожидаемое сообщение: 'Post created successfully', получено: %s", response.Message)
+	}
+}
+
+// TestCreatePostHandlerEmptyTitle проверяет создание поста с пустым заголовком
+func TestCreatePostHandlerEmptyTitle(t *testing.T) {
+	createReq := CreatePostRequest{
+		Title:   "",
+		Content: "Содержимое",
+	}
+
+	jsonBody, _ := json.Marshal(createReq)
+	req := httptest.NewRequest(http.MethodPost, "/api/posts", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	postsHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Ожидаемый статус код: %d, получен: %d", http.StatusBadRequest, w.Code)
+	}
+}
+
+// TestCreatePostHandlerEmptyContent проверяет создание поста с пустым содержимым
+func TestCreatePostHandlerEmptyContent(t *testing.T) {
+	createReq := CreatePostRequest{
+		Title:   "Заголовок",
+		Content: "",
+	}
+
+	jsonBody, _ := json.Marshal(createReq)
+	req := httptest.NewRequest(http.MethodPost, "/api/posts", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	postsHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Ожидаемый статус код: %d, получен: %d", http.StatusBadRequest, w.Code)
+	}
+}
+
+// TestGetPostByIDHandler проверяет получение поста по ID
+func TestGetPostByIDHandler(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/posts/1", nil)
+	w := httptest.NewRecorder()
+
+	postByIDHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Ожидаемый статус код: %d, получен: %d", http.StatusOK, w.Code)
+	}
+
+	var response PostResponse
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
+	}
+
+	if response.Post.ID != 1 {
+		t.Errorf("Ожидаемый ID поста: 1, получен: %d", response.Post.ID)
+	}
+	if response.Post.Author == nil {
+		t.Error("Ожидался непустой автор")
+	}
+	if response.Post.ViewCount < 0 {
+		t.Error("Ожидалось viewCount >= 0")
+	}
+}
+
+// TestGetPostByIDHandlerNotFound проверяет получение несуществующего поста
+func TestGetPostByIDHandlerNotFound(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/posts/9999", nil)
+	w := httptest.NewRecorder()
+
+	postByIDHandler(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("Ожидаемый статус код: %d, получен: %d", http.StatusNotFound, w.Code)
+	}
+
+	var errorResp ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&errorResp); err != nil {
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
+	}
+
+	if errorResp.Message != "Post not found" {
+		t.Errorf("Ожидаемое сообщение: 'Post not found', получено: %s", errorResp.Message)
+	}
+}
+
+// TestUpdatePostHandler проверяет обновление поста
+func TestUpdatePostHandler(t *testing.T) {
+	// Сначала создаём тестовый пост
+	postsMu.Lock()
+	testPost := Post{
+		ID:        999,
+		Title:     "Original Title",
+		Slug:      "original-title",
+		Content:   "Original content",
+		Author:    defaultAuthor,
+		Tags:      []Tag{},
+		Comments:  []Comment{},
+		CreatedAt: time.Now(),
+	}
+	posts[999] = testPost
+	postsMu.Unlock()
+
+	// Обновляем
+	updateReq := CreatePostRequest{
+		Title:    "Updated Title",
+		Excerpt:  "New excerpt",
+		TagNames: []string{"Updated"},
+	}
+
+	jsonBody, _ := json.Marshal(updateReq)
+	req := httptest.NewRequest(http.MethodPut, "/api/posts/999", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	postByIDHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Ожидаемый статус код: %d, получен: %d", http.StatusOK, w.Code)
+	}
+
+	var response PostResponse
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
+	}
+
+	if response.Post.Title != "Updated Title" {
+		t.Errorf("Ожидаемый заголовок: 'Updated Title', получен: %s", response.Post.Title)
+	}
+	if response.Post.Excerpt != "New excerpt" {
+		t.Errorf("Ожидаемое описание: 'New excerpt', получено: %s", response.Post.Excerpt)
+	}
+
+	// Очищаем тестовый пост
+	postsMu.Lock()
+	delete(posts, 999)
+	postsMu.Unlock()
+}
+
+// TestDeletePostHandler проверяет удаление поста
+func TestDeletePostHandler(t *testing.T) {
+	// Создаём тестовый пост
+	postsMu.Lock()
+	testPost := Post{
+		ID:        998,
+		Title:     "To Delete",
+		Slug:      "to-delete",
+		Content:   "Will be deleted",
+		Author:    defaultAuthor,
+		Tags:      []Tag{},
+		Comments:  []Comment{},
+		CreatedAt: time.Now(),
+	}
+	posts[998] = testPost
+	postsMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/posts/998", nil)
+	w := httptest.NewRecorder()
+
+	postByIDHandler(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("Ожидаемый статус код: %d, получен: %d", http.StatusNoContent, w.Code)
+	}
+
+	// Проверяем, что пост удалён
+	postsMu.RLock()
+	_, exists := posts[998]
+	postsMu.RUnlock()
+
+	if exists {
+		t.Error("Ожидалось, что пост будет удалён")
+	}
+}
+
+// TestDeletePostHandlerNotFound проверяет удаление несуществующего поста
+func TestDeletePostHandlerNotFound(t *testing.T) {
+	req := httptest.NewRequest(http.MethodDelete, "/api/posts/9999", nil)
+	w := httptest.NewRecorder()
+
+	postByIDHandler(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("Ожидаемый статус код: %d, получен: %d", http.StatusNotFound, w.Code)
+	}
+}
+
+// TestPostByIDHandlerInvalidID проверяет обработку невалидного ID
+func TestPostByIDHandlerInvalidID(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/posts/invalid", nil)
+	w := httptest.NewRecorder()
+
+	postByIDHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Ожидаемый статус код: %d, получен: %d", http.StatusBadRequest, w.Code)
+	}
+}
+
+// TestPostsHandlerMethodNotAllowed проверяет неправильный метод
+func TestPostsHandlerMethodNotAllowed(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPatch, "/api/posts", nil)
+	w := httptest.NewRecorder()
+
+	postsHandler(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("Ожидаемый статус код: %d, получен: %d", http.StatusMethodNotAllowed, w.Code)
+	}
+}
+
+// TestPostComplexJSONStructure проверяет сложную JSON-структуру поста
+func TestPostComplexJSONStructure(t *testing.T) {
+	createReq := CreatePostRequest{
+		Title:   "Complex Post",
+		Content: "Content with complex structure",
+		TagNames: []string{"Tag1", "Tag2", "Tag3", "Tag4", "Tag5"},
+	}
+
+	jsonBody, _ := json.Marshal(createReq)
+	req := httptest.NewRequest(http.MethodPost, "/api/posts", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	postsHandler(w, req)
+
+	var rawJSON map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
+	}
+
+	// Проверяем наличие всех ожидаемых полей в ответе
+	if _, exists := rawJSON["post"]; !exists {
+		t.Error("Отсутствует поле 'post' в ответе")
+	}
+	if _, exists := rawJSON["message"]; !exists {
+		t.Error("Отсутствует поле 'message' в ответе")
+	}
+	if _, exists := rawJSON["timestamp"]; !exists {
+		t.Error("Отсутствует поле 'timestamp' в ответе")
+	}
+
+	// Проверяем структуру поста
+	postData, ok := rawJSON["post"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Поле 'post' не является объектом")
+	}
+
+	expectedPostFields := []string{"id", "title", "slug", "content", "author", "tags", "view_count", "created_at"}
+	for _, field := range expectedPostFields {
+		if _, exists := postData[field]; !exists {
+			t.Errorf("Отсутствует поле в post: %s", field)
+		}
+	}
+
+	// Проверяем структуру автора
+	authorData, ok := postData["author"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Поле 'author' не является объектом")
+	}
+
+	expectedAuthorFields := []string{"id", "username", "email"}
+	for _, field := range expectedAuthorFields {
+		if _, exists := authorData[field]; !exists {
+			t.Errorf("Отсутствует поле в author: %s", field)
+		}
+	}
+
+	// Проверяем, что tags - это массив
+	tagsData, ok := postData["tags"].([]interface{})
+	if !ok {
+		t.Fatal("Поле 'tags' не является массивом")
+	}
+	if len(tagsData) != 5 {
+		t.Errorf("Ожидалось 5 тегов, получено: %d", len(tagsData))
+	}
+}
+
+// TestGetPostsResponseJSONFormat проверяет формат JSON ответа списка постов
+func TestGetPostsResponseJSONFormat(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/posts", nil)
+	w := httptest.NewRecorder()
+
+	postsHandler(w, req)
+
+	var rawJSON map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
+	}
+
+	expectedFields := []string{"posts", "total", "page", "per_page", "timestamp"}
+	for _, field := range expectedFields {
+		if _, exists := rawJSON[field]; !exists {
+			t.Errorf("Отсутствует поле в JSON ответе: %s", field)
+		}
+	}
+}
+
+// TestCreatePostResponseJSONFormat проверяет формат JSON ответа создания поста
+func TestCreatePostResponseJSONFormat(t *testing.T) {
+	createReq := CreatePostRequest{
+		Title:   "Format Test",
+		Content: "Content",
+	}
+	jsonBody, _ := json.Marshal(createReq)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/posts", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	postsHandler(w, req)
+
+	var rawJSON map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
+	}
+
+	expectedFields := []string{"post", "message", "timestamp"}
+	for _, field := range expectedFields {
+		if _, exists := rawJSON[field]; !exists {
+			t.Errorf("Отсутствует поле в JSON ответе: %s", field)
+		}
+	}
+}
+
+// TestPostResponseJSONFormat проверяет формат JSON ответа одного поста
+func TestPostResponseJSONFormat(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/posts/1", nil)
+	w := httptest.NewRecorder()
+
+	postByIDHandler(w, req)
+
+	var rawJSON map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
+	}
+
+	expectedFields := []string{"post", "timestamp"}
+	for _, field := range expectedFields {
+		if _, exists := rawJSON[field]; !exists {
+			t.Errorf("Отсутствует поле в JSON ответе: %s", field)
+		}
+	}
+}
+
+// TestErrorResponseJSONFormat проверяет формат JSON ответа ошибки
+func TestErrorResponseJSONFormat(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/posts/99999", nil)
+	w := httptest.NewRecorder()
+
+	postByIDHandler(w, req)
+
+	var rawJSON map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
+	}
+
+	expectedFields := []string{"error", "message", "timestamp"}
+	for _, field := range expectedFields {
+		if _, exists := rawJSON[field]; !exists {
+			t.Errorf("Отсутствует поле в JSON ответе: %s", field)
+		}
+	}
+}
+
+// TestAuthorNestedStructure проверяет вложенную структуру Author в Post
+func TestAuthorNestedStructure(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/posts/1", nil)
+	w := httptest.NewRecorder()
+
+	postByIDHandler(w, req)
+
+	var response PostResponse
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
+	}
+
+	if response.Post.Author == nil {
+		t.Fatal("Author должен быть установлен")
+	}
+
+	if response.Post.Author.ID == 0 {
+		t.Error("Author.ID должен быть > 0")
+	}
+	if response.Post.Author.Username == "" {
+		t.Error("Author.Username не должен быть пустым")
+	}
+	if response.Post.Author.Email == "" {
+		t.Error("Author.Email не должен быть пустым")
+	}
+}
+
+// TestTagArrayStructure проверяет структуру массива тегов
+func TestTagArrayStructure(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/posts/1", nil)
+	w := httptest.NewRecorder()
+
+	postByIDHandler(w, req)
+
+	var response PostResponse
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
+	}
+
+	if len(response.Post.Tags) == 0 {
+		t.Error("Ожидалось, что tags не пустой")
+	}
+
+	for i, tag := range response.Post.Tags {
+		if tag.ID == 0 {
+			t.Errorf("Tag[%d].ID должен быть > 0", i)
+		}
+		if tag.Name == "" {
+			t.Errorf("Tag[%d].Name не должен быть пустым", i)
+		}
+		if tag.Slug == "" {
+			t.Errorf("Tag[%d].Slug не должен быть пустым", i)
+		}
+	}
+}
+
+// TestViewCountIncrement проверяет увеличение счётчика просмотров
+func TestViewCountIncrement(t *testing.T) {
+	// Получаем начальное значение
+	req1 := httptest.NewRequest(http.MethodGet, "/api/posts/2", nil)
+	w1 := httptest.NewRecorder()
+	postByIDHandler(w1, req1)
+
+	var resp1 PostResponse
+	json.NewDecoder(w1.Body).Decode(&resp1)
+	initialViews := resp1.Post.ViewCount
+
+	// Получаем ещё раз
+	req2 := httptest.NewRequest(http.MethodGet, "/api/posts/2", nil)
+	w2 := httptest.NewRecorder()
+	postByIDHandler(w2, req2)
+
+	var resp2 PostResponse
+	json.NewDecoder(w2.Body).Decode(&resp2)
+
+	if resp2.Post.ViewCount <= initialViews {
+		t.Errorf("Ожидалось, что viewCount увеличится (было: %d, стало: %d)", initialViews, resp2.Post.ViewCount)
+	}
+}
+
+// TestCreatePostIntegration проверяет полный цикл создания и получения поста
+func TestCreatePostIntegration(t *testing.T) {
+	// Создаём пост
+	createReq := CreatePostRequest{
+		Title:    "Integration Test Post",
+		Content:  "Full integration test content",
+		Excerpt:  "Test excerpt",
+		TagNames: []string{"Integration", "Test"},
+	}
+
+	jsonBody, _ := json.Marshal(createReq)
+	req := httptest.NewRequest(http.MethodPost, "/api/posts", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	postsHandler(w, req)
+
+	var createResp CreatePostResponse
+	if err := json.NewDecoder(w.Body).Decode(&createResp); err != nil {
+		t.Fatalf("Ошибка декодирования JSON создания: %v", err)
+	}
+
+	postID := createResp.Post.ID
+
+	// Получаем созданный пост
+	getReq := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/posts/%d", postID), nil)
+	getW := httptest.NewRecorder()
+	postByIDHandler(getW, getReq)
+
+	var getResp PostResponse
+	if err := json.NewDecoder(getW.Body).Decode(&getResp); err != nil {
+		t.Fatalf("Ошибка декодирования JSON получения: %v", err)
+	}
+
+	if getResp.Post.Title != createReq.Title {
+		t.Errorf("Заголовки не совпадают: %s vs %s", createReq.Title, getResp.Post.Title)
+	}
+	if getResp.Post.Content != createReq.Content {
+		t.Errorf("Содержимое не совпадает: %s vs %s", createReq.Content, getResp.Post.Content)
+	}
+
+	// Удаляем пост
+	deleteReq := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/posts/%d", postID), nil)
+	deleteW := httptest.NewRecorder()
+	postByIDHandler(deleteW, deleteReq)
+
+	if deleteW.Code != http.StatusNoContent {
+		t.Errorf("Ожидаемый статус код при удалении: %d, получен: %d", http.StatusNoContent, deleteW.Code)
 	}
 }
