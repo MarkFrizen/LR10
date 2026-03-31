@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -128,6 +132,12 @@ var (
 	postsMu sync.RWMutex
 	nextID  int64 = 1
 
+	// HTTP сервер для graceful shutdown
+	server *http.Server
+
+	// Флаг завершения работы
+	shutdownInProgress int32
+
 	// Примеры данных для демонстрации
 	defaultAuthor = &Author{
 		ID:        1,
@@ -150,15 +160,53 @@ func main() {
 	// Инициализация тестовыми данными
 	initSamplePosts()
 
-	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/api/stats", statsHandler)
-	http.HandleFunc("/api/echo", echoHandler)
-	http.HandleFunc("/api/posts", postsHandler)
-	http.HandleFunc("/api/posts/", postByIDHandler)
+	// Создаём mux для всех handlers
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/api/stats", statsHandler)
+	mux.HandleFunc("/api/echo", echoHandler)
+	mux.HandleFunc("/api/posts", postsHandler)
+	mux.HandleFunc("/api/posts/", postByIDHandler)
 
+	// Настраиваем HTTP сервер
 	port := ":8080"
-	fmt.Printf("Go API сервер запущен на порту %s\n", port)
-	log.Fatal(http.ListenAndServe(port, nil))
+	server = &http.Server{
+		Addr:         port,
+		Handler:      mux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	// Канал для сигналов завершения
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	// Запускаем сервер в горутине
+	go func() {
+		fmt.Printf("Go API сервер запущен на порту %s\n", port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Ошибка сервера: %v", err)
+		}
+	}()
+
+	// Ожидаем сигнал завершения
+	sig := <-quit
+	fmt.Printf("\nПолучен сигнал %v. Завершение работы...\n", sig)
+
+	// Устанавливаем флаг shutdown
+	shutdownInProgress = 1
+
+	// Создаём context с timeout для graceful shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Пытаемся корректно завершить работу
+	if err := server.Shutdown(ctx); err != nil {
+		log.Fatalf("Ошибка при завершении работы: %v", err)
+	}
+
+	fmt.Println("Сервер успешно завершил работу")
 }
 
 // initSamplePosts создаёт тестовые посты для демонстрации
@@ -534,4 +582,29 @@ func writeErrorResponse(w http.ResponseWriter, status int, message string) {
 	}
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(response)
+}
+
+// isShuttingDown проверяет, идёт ли процесс завершения
+func isShuttingDown() bool {
+	return shutdownInProgress == 1
+}
+
+// GetServer возвращает текущий сервер (для тестов)
+func GetServer() *http.Server {
+	return server
+}
+
+// SetServer устанавливает сервер (для тестов)
+func SetServer(s *http.Server) {
+	server = s
+}
+
+// SetShutdownInProgress устанавливает флаг shutdown (для тестов)
+func SetShutdownInProgress(val int32) {
+	shutdownInProgress = val
+}
+
+// ResetShutdown сбрасывает флаг shutdown (для тестов)
+func ResetShutdown() {
+	shutdownInProgress = 0
 }

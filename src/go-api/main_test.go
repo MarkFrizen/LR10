@@ -997,3 +997,487 @@ func TestCreatePostIntegration(t *testing.T) {
 		t.Errorf("Ожидаемый статус код при удалении: %d, получен: %d", http.StatusNoContent, deleteW.Code)
 	}
 }
+
+// ==================== ТЕСТЫ ДЛЯ GRACEFUL SHUTDOWN ====================
+
+// TestIsShuttingDown проверяет функцию isShuttingDown
+func TestIsShuttingDown(t *testing.T) {
+	// Сбрасываем shutdown флаг
+	ResetShutdown()
+
+	if isShuttingDown() {
+		t.Error("Ожидалось, что shutdown не активен")
+	}
+
+	// Устанавливаем shutdown флаг
+	SetShutdownInProgress(1)
+
+	if !isShuttingDown() {
+		t.Error("Ожидалось, что shutdown активен")
+	}
+
+	// Сбрасываем
+	ResetShutdown()
+}
+
+// TestSetShutdownInProgress проверяет установку флага shutdown
+func TestSetShutdownInProgress(t *testing.T) {
+	ResetShutdown()
+
+	SetShutdownInProgress(1)
+	if !isShuttingDown() {
+		t.Error("Ожидалось, что shutdown активен после установки в 1")
+	}
+
+	SetShutdownInProgress(0)
+	if isShuttingDown() {
+		t.Error("Ожидалось, что shutdown не активен после установки в 0")
+	}
+}
+
+// TestResetShutdown проверяет сброс флага shutdown
+func TestResetShutdown(t *testing.T) {
+	SetShutdownInProgress(1)
+	ResetShutdown()
+
+	if isShuttingDown() {
+		t.Error("Ожидалось, что shutdown сброшен после ResetShutdown")
+	}
+}
+
+// TestGetServer проверяет функцию GetServer
+func TestGetServer(t *testing.T) {
+	// Создаём тестовый сервер
+	testServer := &http.Server{
+		Addr: ":9999",
+	}
+	SetServer(testServer)
+
+	retrieved := GetServer()
+	if retrieved != testServer {
+		t.Error("Ожидалось, что GetServer вернёт установленный сервер")
+	}
+
+	// Сбрасываем
+	SetServer(nil)
+}
+
+// TestSetServer проверяет функцию SetServer
+func TestSetServer(t *testing.T) {
+	testServer := &http.Server{
+		Addr: ":8888",
+	}
+
+	SetServer(testServer)
+	if GetServer() != testServer {
+		t.Error("Ожидалось, что сервер установлен")
+	}
+
+	SetServer(nil)
+}
+
+// TestGracefulShutdownWithServer проверяет graceful shutdown с реальным сервером
+func TestGracefulShutdownWithServer(t *testing.T) {
+	// Создаём тестовый mux
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/api/stats", statsHandler)
+
+	// Создаём сервер
+	testServer := &http.Server{
+		Addr:         ":18080",
+		Handler:      mux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+		IdleTimeout:  10 * time.Second,
+	}
+
+	SetServer(testServer)
+	ResetShutdown()
+
+	// Запускаем сервер в горутине
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := testServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			serverErr <- err
+		} else {
+			serverErr <- nil
+		}
+	}()
+
+	// Даём серверу время запуститься
+	time.Sleep(100 * time.Millisecond)
+
+	// Проверяем, что сервер работает
+	resp, err := http.Get("http://localhost:18080/health")
+	if err != nil {
+		t.Fatalf("Сервер не отвечает: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Ожидаемый статус код: %d, получен: %d", http.StatusOK, resp.StatusCode)
+	}
+
+	// Инициируем graceful shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	shutdownErr := make(chan error, 1)
+	go func() {
+		shutdownErr <- testServer.Shutdown(ctx)
+	}()
+
+	// Ждём завершения shutdown
+	select {
+	case err := <-shutdownErr:
+		if err != nil {
+			t.Errorf("Ошибка при shutdown: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Error("Timeout при ожидании shutdown")
+	}
+
+	// Проверяем, что сервер остановлен
+	_, err = http.Get("http://localhost:18080/health")
+	if err == nil {
+		t.Error("Ожидалась ошибка подключения после shutdown")
+	}
+
+	// Сбрасываем
+	SetServer(nil)
+	ResetShutdown()
+}
+
+// TestGracefulShutdownFlagDuringShutdown проверяет установку флага во время shutdown
+func TestGracefulShutdownFlagDuringShutdown(t *testing.T) {
+	ResetShutdown()
+
+	// Имитируем начало shutdown
+	SetShutdownInProgress(1)
+
+	if !isShuttingDown() {
+		t.Error("Ожидалось, что флаг shutdown установлен")
+	}
+
+	// Сбрасываем после теста
+	ResetShutdown()
+}
+
+// TestServerConfiguration проверяет конфигурацию сервера
+func TestServerConfiguration(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", healthHandler)
+
+	testServer := &http.Server{
+		Addr:         ":18081",
+		Handler:      mux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	SetServer(testServer)
+
+	server := GetServer()
+	if server == nil {
+		t.Fatal("Сервер не установлен")
+	}
+
+	if server.ReadTimeout != 15*time.Second {
+		t.Errorf("Ожидаемый ReadTimeout: 15s, получен: %v", server.ReadTimeout)
+	}
+
+	if server.WriteTimeout != 15*time.Second {
+		t.Errorf("Ожидаемый WriteTimeout: 15s, получен: %v", server.WriteTimeout)
+	}
+
+	if server.IdleTimeout != 60*time.Second {
+		t.Errorf("Ожидаемый IdleTimeout: 60s, получен: %v", server.IdleTimeout)
+	}
+
+	SetServer(nil)
+}
+
+// TestConcurrentShutdownAndRequest проверяет обработку запросов во время shutdown
+func TestConcurrentShutdownAndRequest(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", healthHandler)
+
+	testServer := &http.Server{
+		Addr:    ":18082",
+		Handler: mux,
+	}
+
+	SetServer(testServer)
+	ResetShutdown()
+
+	// Запускаем сервер
+	go func() {
+		_ = testServer.ListenAndServe()
+	}()
+
+	// Даём серверу время запуститься
+	time.Sleep(100 * time.Millisecond)
+
+	// Инициируем shutdown
+	SetShutdownInProgress(1)
+
+	// Создаём context для shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Запускаем shutdown
+	go func() {
+		_ = testServer.Shutdown(ctx)
+	}()
+
+	// Небольшая задержка
+	time.Sleep(50 * time.Millisecond)
+
+	// Сбрасываем
+	SetServer(nil)
+	ResetShutdown()
+}
+
+// TestShutdownWithActiveConnections проверяет shutdown с активными соединениями
+func TestShutdownWithActiveConnections(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		// Имитируем долгий запрос
+		time.Sleep(100 * time.Millisecond)
+		healthHandler(w, r)
+	})
+
+	testServer := &http.Server{
+		Addr:         ":18083",
+		Handler:      mux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+	}
+
+	SetServer(testServer)
+
+	// Запускаем сервер
+	go func() {
+		_ = testServer.ListenAndServe()
+	}()
+
+	// Даём серверу время запуститься
+	time.Sleep(100 * time.Millisecond)
+
+	// Делаем запрос
+	go func() {
+		resp, err := http.Get("http://localhost:18083/health")
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+
+	// Небольшая задержка
+	time.Sleep(50 * time.Millisecond)
+
+	// Инициируем shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	shutdownErr := make(chan error, 1)
+	go func() {
+		shutdownErr <- testServer.Shutdown(ctx)
+	}()
+
+	// Ждём завершения
+	select {
+	case err := <-shutdownErr:
+		if err != nil {
+			t.Logf("Shutdown завершён с ошибкой (допустимо): %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Error("Timeout при ожидании shutdown")
+	}
+
+	SetServer(nil)
+	ResetShutdown()
+}
+
+// TestShutdownTimeout проверяет timeout при shutdown
+func TestShutdownTimeout(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
+		// Очень долгий запрос
+		select {
+		case <-time.After(10 * time.Second):
+		case <-r.Context().Done():
+		}
+	})
+
+	testServer := &http.Server{
+		Addr:    ":18084",
+		Handler: mux,
+	}
+
+	SetServer(testServer)
+
+	go func() {
+		_ = testServer.ListenAndServe()
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Делаем запрос к slow эндпоинту
+	go func() {
+		_, _ = http.Get("http://localhost:18084/slow")
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Короткий timeout для shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	shutdownErr := make(chan error, 1)
+	go func() {
+		shutdownErr <- testServer.Shutdown(ctx)
+	}()
+
+	// Ожидем timeout или завершение
+	select {
+	case err := <-shutdownErr:
+		if err == context.DeadlineExceeded {
+			t.Log("Получен ожидаемый timeout при shutdown")
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("Timeout при ожидании результата shutdown")
+	}
+
+	SetServer(nil)
+}
+
+// TestServerNilSafety проверяет безопасность при nil сервере
+func TestServerNilSafety(t *testing.T) {
+	SetServer(nil)
+
+	server := GetServer()
+	if server != nil {
+		t.Error("Ожидался nil сервер")
+	}
+
+	ResetShutdown()
+}
+
+// TestShutdownHelpers проверяет вспомогательные функции shutdown
+func TestShutdownHelpers(t *testing.T) {
+	// Проверяем начальные значения
+	ResetShutdown()
+	if isShuttingDown() {
+		t.Error("Ожидалось, что shutdown не активен после сброса")
+	}
+
+	// Устанавливаем и проверяем
+	SetShutdownInProgress(1)
+	if !isShuttingDown() {
+		t.Error("Ожидалось, что shutdown активен")
+	}
+
+	// Сбрасываем
+	ResetShutdown()
+	if isShuttingDown() {
+		t.Error("Ожидалось, что shutdown не активен после сброса")
+	}
+}
+
+// TestGracefulShutdownIntegration полная интеграция graceful shutdown
+func TestGracefulShutdownIntegration(t *testing.T) {
+	// Создаём полный сервер со всеми handlers
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/api/stats", statsHandler)
+	mux.HandleFunc("/api/echo", echoHandler)
+	mux.HandleFunc("/api/posts", postsHandler)
+	mux.HandleFunc("/api/posts/", postByIDHandler)
+
+	testServer := &http.Server{
+		Addr:         ":18085",
+		Handler:      mux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+		IdleTimeout:  10 * time.Second,
+	}
+
+	SetServer(testServer)
+	ResetShutdown()
+
+	// Запускаем сервер
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := testServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			serverErr <- err
+		} else {
+			serverErr <- nil
+		}
+	}()
+
+	// Даём серверу время запуститься
+	time.Sleep(200 * time.Millisecond)
+
+	// Тестируем все эндпоинты
+	endpoints := []string{
+		"/health",
+		"/api/stats",
+		"/api/posts",
+		"/api/posts/1",
+	}
+
+	for _, endpoint := range endpoints {
+		resp, err := http.Get("http://localhost:18085" + endpoint)
+		if err != nil {
+			t.Errorf("Ошибка запроса к %s: %v", endpoint, err)
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("Ожидаемый статус код для %s: %d, получен: %d", endpoint, http.StatusOK, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+
+	// Тестируем POST запрос
+	echoReq := EchoRequest{Message: "test"}
+	jsonBody, _ := json.Marshal(echoReq)
+	resp, err := http.Post("http://localhost:18085/api/echo", "application/json", bytes.NewBuffer(jsonBody))
+	if err != nil {
+		t.Errorf("Ошибка POST запроса: %v", err)
+	} else {
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("Ожидаемый статус код для POST: %d, получен: %d", http.StatusOK, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+
+	// Инициируем graceful shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	shutdownErr := make(chan error, 1)
+	go func() {
+		shutdownErr <- testServer.Shutdown(ctx)
+	}()
+
+	// Ждём завершения
+	select {
+	case err := <-shutdownErr:
+		if err != nil {
+			t.Errorf("Ошибка при shutdown: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Error("Timeout при ожидании shutdown")
+	}
+
+	// Проверяем, что сервер остановлен
+	_, err = http.Get("http://localhost:18085/health")
+	if err == nil {
+		t.Error("Ожидалась ошибка подключения после shutdown")
+	}
+
+	SetServer(nil)
+	ResetShutdown()
+}

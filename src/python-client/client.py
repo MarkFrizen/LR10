@@ -6,32 +6,106 @@ Python-клиент для подключения к Go API.
 
 import requests
 import json
+import signal
+import sys
 from typing import Any
+from contextlib import contextmanager
 
 BASE_URL = "http://localhost:8080"
+
+# Глобальный флаг для graceful shutdown
+_shutdown_requested = False
+_session = None
+
+
+class GracefulShutdownError(Exception):
+    """Исключение, выбрасываемое при запросе завершения работы."""
+    pass
+
+
+def _signal_handler(signum, frame):
+    """Обработчик сигналов для graceful shutdown."""
+    global _shutdown_requested
+    _shutdown_requested = True
+    print(f"\nПолучен сигнал {signum}. Завершение работы...", file=sys.stderr)
+
+
+def setup_signal_handlers():
+    """Устанавливает обработчики сигналов для graceful shutdown."""
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
+
+def is_shutdown_requested() -> bool:
+    """Проверяет, был ли запрошен shutdown."""
+    return _shutdown_requested
+
+
+def reset_shutdown_flag():
+    """Сбрасывает флаг shutdown (для тестов)."""
+    global _shutdown_requested
+    _shutdown_requested = False
+
+
+def get_session() -> requests.Session:
+    """Возвращает или создаёт сессию для подключения."""
+    global _session
+    if _session is None:
+        _session = requests.Session()
+    return _session
+
+
+def close_session():
+    """Закрывает сессию и освобождает ресурсы."""
+    global _session
+    if _session is not None:
+        _session.close()
+        _session = None
+
+
+@contextmanager
+def api_session():
+    """Контекстный менеджер для сессии с автоматическим закрытием."""
+    session = get_session()
+    try:
+        yield session
+    finally:
+        close_session()
+
+
+def _check_shutdown():
+    """Проверяет флаг shutdown и выбрасывает исключение если нужно."""
+    if _shutdown_requested:
+        raise GracefulShutdownError("Завершение работы запрошено")
 
 
 def check_health() -> dict[str, Any]:
     """Проверка статуса сервера через /health эндпоинт."""
-    response = requests.get(f"{BASE_URL}/health", timeout=5)
+    _check_shutdown()
+    session = get_session()
+    response = session.get(f"{BASE_URL}/health", timeout=5)
     response.raise_for_status()
     return response.json()
 
 
 def get_stats() -> dict[str, Any]:
     """Получение статистики запросов через /api/stats эндпоинт."""
-    response = requests.get(f"{BASE_URL}/api/stats", timeout=5)
+    _check_shutdown()
+    session = get_session()
+    response = session.get(f"{BASE_URL}/api/stats", timeout=5)
     response.raise_for_status()
     return response.json()
 
 
 def send_echo_message(message: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
     """Отправка сообщения через /api/echo эндпоинт."""
+    _check_shutdown()
     payload = {"message": message}
     if data:
         payload["data"] = data
 
-    response = requests.post(
+    session = get_session()
+    response = session.post(
         f"{BASE_URL}/api/echo",
         json=payload,
         headers={"Content-Type": "application/json"},
@@ -45,7 +119,9 @@ def send_echo_message(message: str, data: dict[str, Any] | None = None) -> dict[
 
 def get_posts(page: int = 1, per_page: int = 10) -> dict[str, Any]:
     """Получение списка постов с пагинацией."""
-    response = requests.get(
+    _check_shutdown()
+    session = get_session()
+    response = session.get(
         f"{BASE_URL}/api/posts",
         params={"page": page, "per_page": per_page},
         timeout=5
@@ -56,20 +132,24 @@ def get_posts(page: int = 1, per_page: int = 10) -> dict[str, Any]:
 
 def get_post(post_id: int) -> dict[str, Any]:
     """Получение поста по ID."""
-    response = requests.get(f"{BASE_URL}/api/posts/{post_id}", timeout=5)
+    _check_shutdown()
+    session = get_session()
+    response = session.get(f"{BASE_URL}/api/posts/{post_id}", timeout=5)
     response.raise_for_status()
     return response.json()
 
 
 def create_post(title: str, content: str, excerpt: str = "", tag_names: list[str] | None = None) -> dict[str, Any]:
     """Создание нового поста."""
+    _check_shutdown()
     payload = {
         "title": title,
         "content": content,
         "excerpt": excerpt,
         "tag_names": tag_names or []
     }
-    response = requests.post(
+    session = get_session()
+    response = session.post(
         f"{BASE_URL}/api/posts",
         json=payload,
         headers={"Content-Type": "application/json"},
@@ -81,6 +161,7 @@ def create_post(title: str, content: str, excerpt: str = "", tag_names: list[str
 
 def update_post(post_id: int, title: str = "", content: str = "", excerpt: str = "", tag_names: list[str] | None = None) -> dict[str, Any]:
     """Обновление поста."""
+    _check_shutdown()
     payload = {}
     if title:
         payload["title"] = title
@@ -91,7 +172,8 @@ def update_post(post_id: int, title: str = "", content: str = "", excerpt: str =
     if tag_names is not None:
         payload["tag_names"] = tag_names
 
-    response = requests.put(
+    session = get_session()
+    response = session.put(
         f"{BASE_URL}/api/posts/{post_id}",
         json=payload,
         headers={"Content-Type": "application/json"},
@@ -103,13 +185,29 @@ def update_post(post_id: int, title: str = "", content: str = "", excerpt: str =
 
 def delete_post(post_id: int) -> bool:
     """Удаление поста. Возвращает True при успехе."""
-    response = requests.delete(f"{BASE_URL}/api/posts/{post_id}", timeout=5)
+    _check_shutdown()
+    session = get_session()
+    response = session.delete(f"{BASE_URL}/api/posts/{post_id}", timeout=5)
     response.raise_for_status()
     return response.status_code == 204
 
 
 def main():
     """Основная функция демонстрации работы с API."""
+    # Устанавливаем обработчики сигналов
+    setup_signal_handlers()
+    
+    try:
+        _run_main()
+    except GracefulShutdownError:
+        print("\nРабота прервана пользователем", file=sys.stderr)
+    finally:
+        # Закрываем сессию
+        close_session()
+
+
+def _run_main():
+    """Основная логика демонстрации работы с API."""
     print("=" * 50)
     print("Python-клиент: подключение к Go API (Блог)")
     print("=" * 50)
@@ -125,6 +223,8 @@ def main():
         print("    ОШИБКА: Не удалось подключиться к серверу!")
         print("    Убедитесь, что Go API запущен: go run main.go")
         return
+    except GracefulShutdownError:
+        raise
     except Exception as e:
         print(f"    ОШИБКА: {e}")
         return
@@ -136,6 +236,8 @@ def main():
         print(f"    Количество запросов: {stats['request_count']}")
         print(f"    Время работы: {stats['uptime']}")
         print(f"    Время запуска: {stats['start_time']}")
+    except GracefulShutdownError:
+        raise
     except Exception as e:
         print(f"    ОШИБКА: {e}")
 
@@ -155,6 +257,8 @@ def main():
             if post.get('tags'):
                 tags = ", ".join(tag['name'] for tag in post['tags'])
                 print(f"       Теги: {tags}")
+    except GracefulShutdownError:
+        raise
     except Exception as e:
         print(f"    ОШИБКА: {e}")
 
@@ -166,6 +270,8 @@ def main():
         print(f"    Содержание (первые 100 симв.): {post['post']['content'][:100]}...")
         print(f"    Просмотров: {post['post']['view_count']}")
         print(f"    Создан: {post['post']['created_at']}")
+    except GracefulShutdownError:
+        raise
     except Exception as e:
         print(f"    ОШИБКА: {e}")
 
@@ -187,6 +293,8 @@ def main():
         
         # Сохраняем ID для дальнейших тестов
         test_post_id = new_post['id']
+    except GracefulShutdownError:
+        raise
     except Exception as e:
         print(f"    ОШИБКА: {e}")
         test_post_id = None
@@ -203,6 +311,8 @@ def main():
             print(f"    ✅ Пост обновлён")
             print(f"    Новое описание: {updated['post']['excerpt']}")
             print(f"    Новые теги: {', '.join(tag['name'] for tag in updated['post']['tags'])}")
+        except GracefulShutdownError:
+            raise
         except Exception as e:
             print(f"    ОШИБКА: {e}")
 
@@ -215,6 +325,8 @@ def main():
                 print(f"    ✅ Пост успешно удалён")
             else:
                 print(f"    ⚠️ Пост не был удалён")
+        except GracefulShutdownError:
+            raise
         except Exception as e:
             print(f"    ОШИБКА: {e}")
 
@@ -222,6 +334,8 @@ def main():
     print("\n[8] Проверка обработки ошибок (пост #999)...")
     try:
         get_post(999)
+    except GracefulShutdownError:
+        raise
     except requests.exceptions.HTTPError as e:
         print(f"    ✅ Ошибка корректно обработана: {e.response.status_code}")
         error_data = e.response.json()
@@ -235,6 +349,8 @@ def main():
         stats = get_stats()
         print(f"    Количество запросов: {stats['request_count']}")
         print(f"    Время работы: {stats['uptime']}")
+    except GracefulShutdownError:
+        raise
     except Exception as e:
         print(f"    ОШИБКА: {e}")
 
