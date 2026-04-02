@@ -8,10 +8,11 @@ import requests
 import json
 import signal
 import sys
+import os
 from typing import Any
 from contextlib import contextmanager
 
-BASE_URL = "http://localhost:8080"
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8080")
 
 # Глобальный флаг для graceful shutdown
 _shutdown_requested = False
