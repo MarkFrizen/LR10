@@ -1,0 +1,96 @@
+syntax = "proto3";
+
+package data;
+
+option go_package = "github.com/frozenm/lr10/grpc-go/proto";
+
+// Сервис для управления данными
+service DataService {
+  // Получить элемент по ID
+  rpc GetData (GetRequest) returns (DataResponse);
+  // Создать новый элемент
+  rpc CreateData (CreateRequest) returns (DataResponse);
+  // Получить все элементы
+  rpc ListData (ListRequest) returns (ListResponse);
+  // Обновить элемент
+  rpc UpdateData (UpdateRequest) returns (DataResponse);
+  // Удалить элемент
+  rpc DeleteData (DeleteRequest) returns (DeleteResponse);
+  // Проверить работоспособность
+  rpc HealthCheck (HealthRequest) returns (HealthResponse);
+}
+
+// Сообщение для запроса одного элемента
+message GetRequest {
+  int64 id = 1;
+}
+
+// Сообщение для создания элемента
+message CreateRequest {
+  string name = 1;
+  string description = 2;
+  double value = 3;
+}
+
+// Сообщение для обновления элемента
+message UpdateRequest {
+  int64 id = 1;
+  string name = 2;
+  string description = 3;
+  double value = 4;
+}
+
+// Сообщение для удаления элемента
+message DeleteRequest {
+  int64 id = 1;
+}
+
+// Сообщение для списка элементов
+message ListRequest {
+  int32 page = 1;
+  int32 per_page = 2;
+}
+
+// Основной элемент данных
+message DataItem {
+  int64 id = 1;
+  string name = 2;
+  string description = 3;
+  double value = 4;
+  string created_at = 5;
+  string updated_at = 6;
+}
+
+// Ответ с одним элементом
+message DataResponse {
+  DataItem item = 1;
+  string message = 2;
+  string timestamp = 3;
+}
+
+// Ответ со списком элементов
+message ListResponse {
+  repeated DataItem items = 1;
+  int32 total = 2;
+  int32 page = 3;
+  int32 per_page = 4;
+  string timestamp = 5;
+}
+
+// Ответ на удаление
+message DeleteResponse {
+  bool success = 1;
+  string message = 2;
+  string timestamp = 3;
+}
+
+// Запрос проверки работоспособности
+message HealthRequest {}
+
+// Ответ проверки работоспособности
+message HealthResponse {
+  string status = 1;
+  string version = 2;
+  string timestamp = 3;
+  int32 total_items = 4;
+}
