@@ -8,6 +8,31 @@ src/go-api/*.test
 src/go-api/*.out
 src/go-api/main
 
+# gRPC Go
+src/grpc-go/*.exe
+src/grpc-go/*.exe~
+src/grpc-go/*.dll
+src/grpc-go/*.so
+src/grpc-go/*.dylib
+src/grpc-go/*.test
+src/grpc-go/*.out
+src/grpc-go/main
+src/grpc-go/proto/*.pb.go
+
+# gRPC Python
+src/grpc-python/__pycache__/
+src/grpc-python/*.py[cod]
+src/grpc-python/*$py.class
+src/grpc-python/*.so
+src/grpc-python/.Python
+src/grpc-python/venv/
+src/grpc-python/env/
+src/grpc-python/.env
+src/grpc-python/*.egg-info/
+src/grpc-python/dist/
+src/grpc-python/build/
+src/grpc-python/proto/*_pb2*.py
+
 # Python
 src/python-client/__pycache__/
 src/python-client/*.py[cod]
