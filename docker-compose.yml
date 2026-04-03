@@ -46,6 +46,47 @@ services:
           cpus: '0.25'
           memory: 128M
 
+  grpc-go:
+    build:
+      context: ./src/grpc-go
+      dockerfile: Dockerfile
+    container_name: grpc-go
+    ports:
+      - "50051:50051"
+    networks:
+      - app-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 50051"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+  grpc-python:
+    build:
+      context: ./src/grpc-python
+      dockerfile: Dockerfile
+    container_name: grpc-python
+    depends_on:
+      grpc-go:
+        condition: service_healthy
+    environment:
+      - GRPC_SERVER=grpc-go:50051
+    networks:
+      - app-network
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+
 networks:
   app-network:
     driver: bridge
