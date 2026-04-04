@@ -9,14 +9,26 @@ import json
 import signal
 import sys
 import os
+import threading
 from typing import Any
 from contextlib import contextmanager
 
+# --- Константы ---
+
+# Адрес REST API по умолчанию (переопределяется через BASE_URL)
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8080")
 
-# Глобальный флаг для graceful shutdown
-_shutdown_requested = False
+# Таймаут запросов (секунды)
+REQUEST_TIMEOUT = 5
+
+# --- Глобальное состояние с защитой блокировкой ---
+
+# Блокировка для потокобезопасного создания сессии
+_lock = threading.Lock()
 _session = None
+
+# Флаг graceful-завершения
+_shutdown_requested = False
 
 
 class GracefulShutdownError(Exception):
@@ -25,43 +37,47 @@ class GracefulShutdownError(Exception):
 
 
 def _signal_handler(signum, frame):
-    """Обработчик сигналов для graceful shutdown."""
+    """Обработчик сигналов для graceful-завершения."""
     global _shutdown_requested
     _shutdown_requested = True
     print(f"\nПолучен сигнал {signum}. Завершение работы...", file=sys.stderr)
 
 
 def setup_signal_handlers():
-    """Устанавливает обработчики сигналов для graceful shutdown."""
+    """Устанавливает обработчики сигналов для graceful-завершения."""
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
 
 def is_shutdown_requested() -> bool:
-    """Проверяет, был ли запрошен shutdown."""
+    """Проверяет, был ли запрошен graceful shutdown."""
     return _shutdown_requested
 
 
 def reset_shutdown_flag():
-    """Сбрасывает флаг shutdown (для тестов)."""
+    """Сбрасывает флаг завершения (для тестов)."""
     global _shutdown_requested
     _shutdown_requested = False
 
 
 def get_session() -> requests.Session:
-    """Возвращает или создаёт сессию для подключения."""
+    """Возвращает или создаёт сессию для подключения (потокобезопасно)."""
     global _session
     if _session is None:
-        _session = requests.Session()
+        with _lock:
+            # Повторная проверка после захвата блокировки
+            if _session is None:
+                _session = requests.Session()
     return _session
 
 
 def close_session():
     """Закрывает сессию и освобождает ресурсы."""
     global _session
-    if _session is not None:
-        _session.close()
-        _session = None
+    with _lock:
+        if _session is not None:
+            _session.close()
+            _session = None
 
 
 @contextmanager
@@ -75,31 +91,33 @@ def api_session():
 
 
 def _check_shutdown():
-    """Проверяет флаг shutdown и выбрасывает исключение если нужно."""
+    """Проверяет флаг завершения и выбрасывает исключение при необходимости."""
     if _shutdown_requested:
         raise GracefulShutdownError("Завершение работы запрошено")
 
 
+# === Эндпоинты общего назначения ===
+
 def check_health() -> dict[str, Any]:
-    """Проверка статуса сервера через /health эндпоинт."""
+    """Проверка статуса сервера через эндпоинт /health."""
     _check_shutdown()
     session = get_session()
-    response = session.get(f"{BASE_URL}/health", timeout=5)
+    response = session.get(f"{BASE_URL}/health", timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     return response.json()
 
 
 def get_stats() -> dict[str, Any]:
-    """Получение статистики запросов через /api/stats эндпоинт."""
+    """Получение статистики запросов через эндпоинт /api/stats."""
     _check_shutdown()
     session = get_session()
-    response = session.get(f"{BASE_URL}/api/stats", timeout=5)
+    response = session.get(f"{BASE_URL}/api/stats", timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     return response.json()
 
 
 def send_echo_message(message: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Отправка сообщения через /api/echo эндпоинт."""
+    """Отправка сообщения через эндпоинт /api/echo."""
     _check_shutdown()
     payload = {"message": message}
     if data:
@@ -110,7 +128,7 @@ def send_echo_message(message: str, data: dict[str, Any] | None = None) -> dict[
         f"{BASE_URL}/api/echo",
         json=payload,
         headers={"Content-Type": "application/json"},
-        timeout=5
+        timeout=REQUEST_TIMEOUT
     )
     response.raise_for_status()
     return response.json()
@@ -125,43 +143,49 @@ def get_posts(page: int = 1, per_page: int = 10) -> dict[str, Any]:
     response = session.get(
         f"{BASE_URL}/api/posts",
         params={"page": page, "per_page": per_page},
-        timeout=5
+        timeout=REQUEST_TIMEOUT
     )
     response.raise_for_status()
     return response.json()
 
 
 def get_post(post_id: int) -> dict[str, Any]:
-    """Получение поста по ID."""
+    """Получение поста по идентификатору."""
     _check_shutdown()
     session = get_session()
-    response = session.get(f"{BASE_URL}/api/posts/{post_id}", timeout=5)
+    response = session.get(
+        f"{BASE_URL}/api/posts/{post_id}",
+        timeout=REQUEST_TIMEOUT
+    )
     response.raise_for_status()
     return response.json()
 
 
-def create_post(title: str, content: str, excerpt: str = "", tag_names: list[str] | None = None) -> dict[str, Any]:
+def create_post(title: str, content: str, excerpt: str = "", tag_names: list[str] | None = None, author_id: int | None = None) -> dict[str, Any]:
     """Создание нового поста."""
     _check_shutdown()
     payload = {
         "title": title,
         "content": content,
         "excerpt": excerpt,
-        "tag_names": tag_names or []
+        "tag_names": tag_names or [],
     }
+    if author_id is not None:
+        payload["author_id"] = author_id
+
     session = get_session()
     response = session.post(
         f"{BASE_URL}/api/posts",
         json=payload,
         headers={"Content-Type": "application/json"},
-        timeout=5
+        timeout=REQUEST_TIMEOUT
     )
     response.raise_for_status()
     return response.json()
 
 
 def update_post(post_id: int, title: str = "", content: str = "", excerpt: str = "", tag_names: list[str] | None = None) -> dict[str, Any]:
-    """Обновление поста."""
+    """Обновление существующего поста."""
     _check_shutdown()
     payload = {}
     if title:
@@ -178,7 +202,7 @@ def update_post(post_id: int, title: str = "", content: str = "", excerpt: str =
         f"{BASE_URL}/api/posts/{post_id}",
         json=payload,
         headers={"Content-Type": "application/json"},
-        timeout=5
+        timeout=REQUEST_TIMEOUT
     )
     response.raise_for_status()
     return response.json()
@@ -188,7 +212,10 @@ def delete_post(post_id: int) -> bool:
     """Удаление поста. Возвращает True при успехе."""
     _check_shutdown()
     session = get_session()
-    response = session.delete(f"{BASE_URL}/api/posts/{post_id}", timeout=5)
+    response = session.delete(
+        f"{BASE_URL}/api/posts/{post_id}",
+        timeout=REQUEST_TIMEOUT
+    )
     response.raise_for_status()
     return response.status_code == 204
 
@@ -197,7 +224,7 @@ def main():
     """Основная функция демонстрации работы с API."""
     # Устанавливаем обработчики сигналов
     setup_signal_handlers()
-    
+
     try:
         _run_main()
     except GracefulShutdownError:
@@ -213,7 +240,7 @@ def _run_main():
     print("Python-клиент: подключение к Go API (Блог)")
     print("=" * 50)
 
-    # 1. Проверка health эндпоинта
+    # 1. Проверка эндпоинта здоровья
     print("\n[1] Проверка статуса сервера (/health)...")
     try:
         health = check_health()
@@ -222,7 +249,7 @@ def _run_main():
         print(f"    Время: {health['timestamp']}")
     except requests.exceptions.ConnectionError:
         print("    ОШИБКА: Не удалось подключиться к серверу!")
-        print("    Убедитесь, что Go API запущен: go run main.go")
+        print("    Убедитесь, что REST API запущен: go run main.go")
         return
     except GracefulShutdownError:
         raise
@@ -248,10 +275,10 @@ def _run_main():
         posts_response = get_posts(page=1, per_page=5)
         print(f"    Всего постов: {posts_response['total']}")
         print(f"    Страница: {posts_response['page']}")
-        print(f"    Найдено постов на странице: {len(posts_response['posts'])}")
-        
+        print(f"    Постов на странице: {len(posts_response['posts'])}")
+
         for post in posts_response['posts'][:3]:
-            print(f"\n    📝 Пост #{post['id']}: {post['title']}")
+            print(f"\n    Пост #{post['id']}: {post['title']}")
             print(f"       Slug: {post['slug']}")
             print(f"       Автор: {post['author']['username']}")
             print(f"       Просмотры: {post['view_count']}")
@@ -286,12 +313,12 @@ def _run_main():
             tag_names=["Python", "Beginner", "Tutorial"]
         )
         new_post = new_post_data['post']
-        print(f"    ✅ Пост создан с ID: {new_post['id']}")
+        print(f"    Пост создан с ID: {new_post['id']}")
         print(f"    Заголовок: {new_post['title']}")
         print(f"    Slug: {new_post['slug']}")
         print(f"    Теги: {', '.join(tag['name'] for tag in new_post['tags'])}")
         print(f"    Сообщение: {new_post_data['message']}")
-        
+
         # Сохраняем ID для дальнейших тестов
         test_post_id = new_post['id']
     except GracefulShutdownError:
@@ -309,7 +336,7 @@ def _run_main():
                 excerpt="Обновлённое описание для тестового поста",
                 tag_names=["Python", "Updated", "Hot"]
             )
-            print(f"    ✅ Пост обновлён")
+            print(f"    Пост обновлён")
             print(f"    Новое описание: {updated['post']['excerpt']}")
             print(f"    Новые теги: {', '.join(tag['name'] for tag in updated['post']['tags'])}")
         except GracefulShutdownError:
@@ -323,9 +350,9 @@ def _run_main():
         try:
             result = delete_post(test_post_id)
             if result:
-                print(f"    ✅ Пост успешно удалён")
+                print(f"    Пост успешно удалён")
             else:
-                print(f"    ⚠️ Пост не был удалён")
+                print(f"    Пост не был удалён")
         except GracefulShutdownError:
             raise
         except Exception as e:
@@ -338,9 +365,9 @@ def _run_main():
     except GracefulShutdownError:
         raise
     except requests.exceptions.HTTPError as e:
-        print(f"    ✅ Ошибка корректно обработана: {e.response.status_code}")
+        print(f"    Ошибка корректно обработана: {e.response.status_code}")
         error_data = e.response.json()
-        print(f"    Сообщение ошибки: {error_data.get('message', 'Unknown error')}")
+        print(f"    Сообщение ошибки: {error_data.get('message', 'Неизвестная ошибка')}")
     except Exception as e:
         print(f"    ОШИБКА: {e}")
 

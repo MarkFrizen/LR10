@@ -8,19 +8,17 @@ import grpc
 import logging
 import signal
 import os
+import threading
 from contextlib import contextmanager
 
 # Импортируем сгенерированные proto-файлы
 import proto.data_pb2 as data_pb2
 import proto.data_pb2_grpc as data_pb2_grpc
 
-# Конфигурация
-GRPC_SERVER = os.getenv("GRPC_SERVER", "localhost:50051")
+# --- Константы ---
 
-# Глобальный флаг для graceful shutdown
-_shutdown_requested = False
-_channel = None
-_stub = None
+# Адрес gRPC-сервера по умолчанию
+DEFAULT_GRPC_SERVER = "localhost:50051"
 
 # Настройка логирования
 logging.basicConfig(
@@ -29,6 +27,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# --- Глобальное состояние с защитой блокировкой ---
+
+# Блокировка для потокобезопасного создания канала и stub
+_lock = threading.Lock()
+_channel = None
+_stub = None
+
+# Флаг graceful-завершения
+_shutdown_requested = False
+
 
 class GracefulShutdownError(Exception):
     """Исключение, выбрасываемое при запросе завершения работы."""
@@ -36,52 +44,60 @@ class GracefulShutdownError(Exception):
 
 
 def _signal_handler(signum, frame):
-    """Обработчик сигналов для graceful shutdown."""
+    """Обработчик сигналов для graceful-завершения."""
     global _shutdown_requested
     _shutdown_requested = True
     logger.info(f"Получен сигнал {signum}. Завершение работы...")
 
 
 def setup_signal_handlers():
-    """Устанавливает обработчики сигналов для graceful shutdown."""
+    """Устанавливает обработчики сигналов для graceful-завершения."""
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
 
 def is_shutdown_requested() -> bool:
-    """Проверяет, был ли запрошен shutdown."""
+    """Проверяет, был ли запрошен graceful shutdown."""
     return _shutdown_requested
 
 
 def reset_shutdown_flag():
-    """Сбрасывает флаг shutdown (для тестов)."""
+    """Сбрасывает флаг завершения (для тестов)."""
     global _shutdown_requested
     _shutdown_requested = False
 
 
 def get_channel() -> grpc.Channel:
-    """Возвращает или создаёт канал для подключения."""
+    """Возвращает или создаёт канал для подключения (потокобезопасно)."""
     global _channel
     if _channel is None:
-        _channel = grpc.insecure_channel(GRPC_SERVER)
+        with _lock:
+            # Повторная проверка после захвата блокировки
+            if _channel is None:
+                _channel = grpc.insecure_channel(os.getenv("GRPC_SERVER", DEFAULT_GRPC_SERVER))
     return _channel
 
 
 def get_stub() -> data_pb2_grpc.DataServiceStub:
-    """Возвращает или создаёт stub для подключения."""
+    """Возвращает или создаёт stub для подключения (потокобезопасно)."""
     global _stub
     if _stub is None:
-        _stub = data_pb2_grpc.DataServiceStub(get_channel())
+        with _lock:
+            # Повторная проверка после захвата блокировки
+            if _stub is None:
+                _stub = data_pb2_grpc.DataServiceStub(get_channel())
     return _stub
 
 
 def close_channel():
     """Закрывает канал и освобождает ресурсы."""
     global _channel, _stub
-    if _channel is not None:
-        _channel.close()
-        _channel = None
-        _stub = None
+    with _lock:
+        if _channel is not None:
+            _channel.close()
+            _channel = None
+            _stub = None
+
 
 @contextmanager
 def grpc_connection():
@@ -93,10 +109,12 @@ def grpc_connection():
     finally:
         close_channel()
 
+
 def _check_shutdown():
-    """Проверяет флаг shutdown и выбрасывает исключение если нужно."""
+    """Проверяет флаг завершения и выбрасывает исключение при необходимости."""
     if _shutdown_requested:
         raise GracefulShutdownError("Завершение работы запрошено")
+
 
 # === Функции для работы с DataService ===
 
@@ -105,6 +123,7 @@ def health_check() -> data_pb2.HealthResponse:
     _check_shutdown()
     stub = get_stub()
     return stub.HealthCheck(data_pb2.HealthRequest())
+
 
 def create_data(name: str, description: str = "", value: float = 0.0) -> data_pb2.DataResponse:
     """Создание нового элемента данных."""
@@ -117,12 +136,14 @@ def create_data(name: str, description: str = "", value: float = 0.0) -> data_pb
     )
     return stub.CreateData(request)
 
+
 def get_data(item_id: int) -> data_pb2.DataResponse:
-    """Получение элемента по ID."""
+    """Получение элемента по идентификатору."""
     _check_shutdown()
     stub = get_stub()
     request = data_pb2.GetRequest(id=item_id)
     return stub.GetData(request)
+
 
 def list_data(page: int = 1, per_page: int = 10) -> data_pb2.ListResponse:
     """Получение списка элементов с пагинацией."""
@@ -136,7 +157,7 @@ def list_data(page: int = 1, per_page: int = 10) -> data_pb2.ListResponse:
 
 
 def update_data(item_id: int, name: str = "", description: str = "", value: float = 0.0) -> data_pb2.DataResponse:
-    """Обновление элемента."""
+    """Обновление элемента данных."""
     _check_shutdown()
     stub = get_stub()
     request = data_pb2.UpdateRequest(
@@ -150,7 +171,7 @@ def update_data(item_id: int, name: str = "", description: str = "", value: floa
 
 
 def delete_data(item_id: int) -> data_pb2.DeleteResponse:
-    """Удаление элемента."""
+    """Удаление элемента данных."""
     _check_shutdown()
     stub = get_stub()
     request = data_pb2.DeleteRequest(id=item_id)
@@ -191,7 +212,7 @@ def _run_main():
     print("Python gRPC-клиент: подключение к Go gRPC-серверу")
     print("=" * 60)
 
-    # 1. Проверка health
+    # 1. Проверка здоровья
     print("\n[1] Проверка работоспособности сервера...")
     try:
         health = health_check()
@@ -213,7 +234,7 @@ def _run_main():
         print(f"    Элементов на странице: {len(list_response.items)}")
 
         for item in list_response.items[:3]:
-            print(f"\n    📦 Элемент:")
+            print(f"\n    Элемент:")
             print_data_item(item)
     except grpc.RpcError as e:
         logger.error(f"Ошибка при получении списка: {e.code()}")
@@ -235,7 +256,7 @@ def _run_main():
             description="Этот элемент был создан через Python gRPC-клиент",
             value=42.5
         )
-        print(f"    ✅ Элемент создан")
+        print(f"    Элемент создан")
         print(f"    Сообщение: {response.message}")
         print_data_item(response.item)
 
@@ -255,7 +276,7 @@ def _run_main():
                 description="Описание было изменено",
                 value=99.9
             )
-            print(f"    ✅ Элемент обновлён")
+            print(f"    Элемент обновлён")
             print(f"    Сообщение: {response.message}")
             print_data_item(response.item)
         except grpc.RpcError as e:
@@ -269,7 +290,7 @@ def _run_main():
             description="Для демонстрации пагинации",
             value=15.75
         )
-        print(f"    ✅ Элемент создан с ID: {response.item.id}")
+        print(f"    Элемент создан с ID: {response.item.id}")
     except grpc.RpcError as e:
         logger.error(f"Ошибка при создании элемента: {e.code()}")
 
@@ -288,30 +309,30 @@ def _run_main():
         try:
             response = delete_data(test_item_id)
             if response.success:
-                print(f"    ✅ Элемент успешно удалён")
+                print(f"    Элемент успешно удалён")
                 print(f"    Сообщение: {response.message}")
         except grpc.RpcError as e:
             logger.error(f"Ошибка при удалении элемента: {e.code()}")
 
-    # 9. Проверка обработки ошибок - получение несуществующего элемента
+    # 9. Проверка обработки ошибок — получение несуществующего элемента
     print("\n[9] Проверка обработки ошибок (элемент #999)...")
     try:
         get_data(999)
-        print("    ⚠️ Ошибка: элемент должен быть не найден")
+        print("    Ошибка: элемент должен быть не найден")
     except grpc.RpcError as e:
         if e.code() == grpc.StatusCode.NOT_FOUND:
-            print(f"    ✅ Ошибка корректно обработана: NOT_FOUND")
+            print(f"    Ошибка корректно обработана: NOT_FOUND")
         else:
             logger.error(f"Неожиданная ошибка: {e.code()}")
 
-    # 10. Финальная проверка health
+    # 10. Финальная проверка здоровья
     print("\n[10] Финальная проверка работоспособности...")
     try:
         health = health_check()
         print(f"    Статус: {health.status}")
         print(f"    Элементов на сервере: {health.total_items}")
     except grpc.RpcError as e:
-        logger.error(f"Ошибка при проверке health: {e.code()}")
+        logger.error(f"Ошибка при проверке здоровья: {e.code()}")
 
     print("\n" + "=" * 60)
     print("Работа с gRPC-сервером завершена успешно!")

@@ -8,22 +8,24 @@ import (
 	pb "github.com/frozenm/lr10/grpc-go/proto"
 )
 
-// setupTestServer создаёт тестовый сервер
-func setupTestServer() *dataServer {
-	return &dataServer{
-		items:   make(map[int64]*DataItem),
-		nextID:  1,
+// setupTestServer создаёт тестовое хранилище и сервер
+func setupTestServer() (*dataServer, *ItemStore) {
+	store := NewItemStore()
+	server := &dataServer{
+		store:   store,
 		started: time.Now(),
 	}
+	return server, store
 }
 
-// TestDataItemToProto тестирует функцию toProto
+// --- Тесты преобразования в proto ---
+
 func TestDataItemToProto(t *testing.T) {
 	now := time.Now()
 	item := &DataItem{
 		ID:          1,
-		Name:        "Test",
-		Description: "Test Description",
+		Name:        "Тест",
+		Description: "Тестовое описание",
 		Value:       100.5,
 		CreatedAt:   now,
 		UpdatedAt:   now,
@@ -32,101 +34,113 @@ func TestDataItemToProto(t *testing.T) {
 	proto := toProto(item)
 
 	if proto.Id != item.ID {
-		t.Errorf("toProto().Id = %d, want %d", proto.Id, item.ID)
+		t.Errorf("toProto().Id = %d, ожидалось %d", proto.Id, item.ID)
 	}
 	if proto.Name != item.Name {
-		t.Errorf("toProto().Name = %s, want %s", proto.Name, item.Name)
+		t.Errorf("toProto().Name = %s, ожидалось %s", proto.Name, item.Name)
 	}
 	if proto.Description != item.Description {
-		t.Errorf("toProto().Description = %s, want %s", proto.Description, item.Description)
+		t.Errorf("toProto().Description = %s, ожидалось %s", proto.Description, item.Description)
 	}
 	if proto.Value != item.Value {
-		t.Errorf("toProto().Value = %f, want %f", proto.Value, item.Value)
+		t.Errorf("toProto().Value = %f, ожидалось %f", proto.Value, item.Value)
 	}
 }
 
-// TestHealthCheck тестирует проверку работоспособности
+// --- Тесты проверки здоровья ---
+
 func TestHealthCheck(t *testing.T) {
-	server := setupTestServer()
+	server, store := setupTestServer()
 
 	// Добавляем тестовые данные
-	server.items[1] = &DataItem{ID: 1, Name: "Test"}
-	server.items[2] = &DataItem{ID: 2, Name: "Test2"}
-	server.nextID = 3
+	store.items[1] = &DataItem{ID: 1, Name: "Тест"}
+	store.items[2] = &DataItem{ID: 2, Name: "Тест2"}
+	store.nextID = 3
 
 	resp, err := server.HealthCheck(context.Background(), &pb.HealthRequest{})
 	if err != nil {
-		t.Fatalf("HealthCheck() error = %v", err)
+		t.Fatalf("HealthCheck() ошибка = %v", err)
 	}
 
-	if resp.Status != "healthy" {
-		t.Errorf("HealthCheck().Status = %s, want healthy", resp.Status)
+	if resp.Status != "работает" {
+		t.Errorf("HealthCheck().Status = %s, ожидалось 'работает'", resp.Status)
 	}
-	if resp.Version != "1.0.0" {
-		t.Errorf("HealthCheck().Version = %s, want 1.0.0", resp.Version)
+	if resp.Version != serviceVersion {
+		t.Errorf("HealthCheck().Version = %s, ожидалось %s", resp.Version, serviceVersion)
 	}
 	if resp.TotalItems != 2 {
-		t.Errorf("HealthCheck().TotalItems = %d, want 2", resp.TotalItems)
+		t.Errorf("HealthCheck().TotalItems = %d, ожидалось 2", resp.TotalItems)
 	}
 	if resp.Timestamp == "" {
-		t.Error("HealthCheck().Timestamp should not be empty")
+		t.Error("HealthCheck().Timestamp не должен быть пустым")
 	}
 }
 
-// TestCreateData тестирует создание элемента
+// --- Тесты создания элемента ---
+
 func TestCreateData(t *testing.T) {
-	server := setupTestServer()
+	server, _ := setupTestServer()
 
 	resp, err := server.CreateData(context.Background(), &pb.CreateRequest{
-		Name:        "New Item",
-		Description: "New item description",
+		Name:        "Новый элемент",
+		Description: "Описание нового элемента",
 		Value:       50.25,
 	})
 	if err != nil {
-		t.Fatalf("CreateData() error = %v", err)
+		t.Fatalf("CreateData() ошибка = %v", err)
 	}
 
-	if resp.Item.Name != "New Item" {
-		t.Errorf("CreateData().Item.Name = %s, want New Item", resp.Item.Name)
+	if resp.Item.Name != "Новый элемент" {
+		t.Errorf("CreateData().Item.Name = %s, ожидалось 'Новый элемент'", resp.Item.Name)
 	}
-	if resp.Item.Description != "New item description" {
-		t.Errorf("CreateData().Item.Description = %s, want New item description", resp.Item.Description)
+	if resp.Item.Description != "Описание нового элемента" {
+		t.Errorf("CreateData().Item.Description = %s, ожидалось 'Описание нового элемента'", resp.Item.Description)
 	}
 	if resp.Item.Value != 50.25 {
-		t.Errorf("CreateData().Item.Value = %f, want 50.25", resp.Item.Value)
+		t.Errorf("CreateData().Item.Value = %f, ожидалось 50.25", resp.Item.Value)
 	}
 	if resp.Item.Id != 1 {
-		t.Errorf("CreateData().Item.Id = %d, want 1", resp.Item.Id)
+		t.Errorf("CreateData().Item.Id = %d, ожидалось 1", resp.Item.Id)
 	}
 	if resp.Message == "" {
-		t.Error("CreateData().Message should not be empty")
-	}
-	if server.nextID != 2 {
-		t.Errorf("nextID = %d, want 2", server.nextID)
+		t.Error("CreateData().Message не должен быть пустым")
 	}
 }
 
-// TestCreateDataEmptyName тестирует создание элемента с пустым именем
 func TestCreateDataEmptyName(t *testing.T) {
-	server := setupTestServer()
+	server, _ := setupTestServer()
 
 	_, err := server.CreateData(context.Background(), &pb.CreateRequest{
 		Name:        "",
-		Description: "Description",
+		Description: "Описание",
 		Value:       10.0,
 	})
 	if err == nil {
-		t.Error("CreateData() should return error for empty name")
+		t.Error("CreateData() должна вернуть ошибку при пустом имени")
 	}
 }
 
-// TestGetData тестирует получение элемента
+func TestCreateDataWhitespaceOnlyName(t *testing.T) {
+	server, _ := setupTestServer()
+
+	_, err := server.CreateData(context.Background(), &pb.CreateRequest{
+		Name:        "   ",
+		Description: "Описание",
+		Value:       10.0,
+	})
+	if err == nil {
+		t.Error("CreateData() должна вернуть ошибку при имени из одних пробелов")
+	}
+}
+
+// --- Тесты получения элемента ---
+
 func TestGetData(t *testing.T) {
-	server := setupTestServer()
+	server, _ := setupTestServer()
 
 	// Создаём элемент
 	createResp, _ := server.CreateData(context.Background(), &pb.CreateRequest{
-		Name:  "Test Item",
+		Name:  "Тестовый элемент",
 		Value: 100.0,
 	})
 
@@ -135,41 +149,41 @@ func TestGetData(t *testing.T) {
 		Id: createResp.Item.Id,
 	})
 	if err != nil {
-		t.Fatalf("GetData() error = %v", err)
+		t.Fatalf("GetData() ошибка = %v", err)
 	}
 
 	if resp.Item.Id != createResp.Item.Id {
-		t.Errorf("GetData().Item.Id = %d, want %d", resp.Item.Id, createResp.Item.Id)
+		t.Errorf("GetData().Item.Id = %d, ожидалось %d", resp.Item.Id, createResp.Item.Id)
 	}
 	if resp.Item.Name != createResp.Item.Name {
-		t.Errorf("GetData().Item.Name = %s, want %s", resp.Item.Name, createResp.Item.Name)
+		t.Errorf("GetData().Item.Name = %s, ожидалось %s", resp.Item.Name, createResp.Item.Name)
 	}
 }
 
-// TestGetDataNotFound тестирует получение несуществующего элемента
 func TestGetDataNotFound(t *testing.T) {
-	server := setupTestServer()
+	server, _ := setupTestServer()
 
 	_, err := server.GetData(context.Background(), &pb.GetRequest{
 		Id: 999,
 	})
 	if err == nil {
-		t.Error("GetData() should return error for non-existent item")
+		t.Error("GetData() должна вернуть ошибку для несуществующего элемента")
 	}
 }
 
-// TestListData тестирует получение списка элементов
+// --- Тесты списка элементов ---
+
 func TestListData(t *testing.T) {
-	server := setupTestServer()
+	server, _ := setupTestServer()
 
 	// Создаём несколько элементов
 	for i := 0; i < 5; i++ {
 		_, err := server.CreateData(context.Background(), &pb.CreateRequest{
-			Name:  "Item",
+			Name:  "Элемент",
 			Value: float64(i),
 		})
 		if err != nil {
-			t.Fatalf("CreateData() error = %v", err)
+			t.Fatalf("CreateData() ошибка = %v", err)
 		}
 	}
 
@@ -179,32 +193,31 @@ func TestListData(t *testing.T) {
 		PerPage: 10,
 	})
 	if err != nil {
-		t.Fatalf("ListData() error = %v", err)
+		t.Fatalf("ListData() ошибка = %v", err)
 	}
 
 	if resp.Total != 5 {
-		t.Errorf("ListData().Total = %d, want 5", resp.Total)
+		t.Errorf("ListData().Total = %d, ожидалось 5", resp.Total)
 	}
 	if len(resp.Items) != 5 {
-		t.Errorf("ListData() returned %d items, want 5", len(resp.Items))
+		t.Errorf("ListData() вернуло %d элементов, ожидалось 5", len(resp.Items))
 	}
 	if resp.Page != 1 {
-		t.Errorf("ListData().Page = %d, want 1", resp.Page)
+		t.Errorf("ListData().Page = %d, ожидалось 1", resp.Page)
 	}
 }
 
-// TestListDataPagination тестирует пагинацию
 func TestListDataPagination(t *testing.T) {
-	server := setupTestServer()
+	server, _ := setupTestServer()
 
 	// Создаём 10 элементов
 	for i := 0; i < 10; i++ {
 		_, err := server.CreateData(context.Background(), &pb.CreateRequest{
-			Name:  "Item",
+			Name:  "Элемент",
 			Value: float64(i),
 		})
 		if err != nil {
-			t.Fatalf("CreateData() error = %v", err)
+			t.Fatalf("CreateData() ошибка = %v", err)
 		}
 	}
 
@@ -214,127 +227,210 @@ func TestListDataPagination(t *testing.T) {
 		PerPage: 3,
 	})
 	if err != nil {
-		t.Fatalf("ListData() error = %v", err)
+		t.Fatalf("ListData() ошибка = %v", err)
 	}
 
 	if resp.Total != 10 {
-		t.Errorf("ListData().Total = %d, want 10", resp.Total)
+		t.Errorf("ListData().Total = %d, ожидалось 10", resp.Total)
 	}
 	if len(resp.Items) != 3 {
-		t.Errorf("ListData() returned %d items, want 3", len(resp.Items))
+		t.Errorf("ListData() вернуло %d элементов, ожидалось 3", len(resp.Items))
 	}
 }
 
-// TestUpdateData тестирует обновление элемента
+// --- Тесты обновления элемента ---
+
 func TestUpdateData(t *testing.T) {
-	server := setupTestServer()
+	server, _ := setupTestServer()
 
 	// Создаём элемент
 	createResp, _ := server.CreateData(context.Background(), &pb.CreateRequest{
-		Name:        "Original",
-		Description: "Original description",
+		Name:        "Оригинал",
+		Description: "Оригинальное описание",
 		Value:       100.0,
 	})
 
 	// Обновляем элемент
 	updateResp, err := server.UpdateData(context.Background(), &pb.UpdateRequest{
-		Id:           createResp.Item.Id,
-		Name:         "Updated",
-		Description:  "Updated description",
-		Value:        200.0,
-		UpdateValue:  true,
+		Id:          createResp.Item.Id,
+		Name:        "Обновлённый",
+		Description: "Обновлённое описание",
+		Value:       200.0,
+		UpdateValue: true,
 	})
 	if err != nil {
-		t.Fatalf("UpdateData() error = %v", err)
+		t.Fatalf("UpdateData() ошибка = %v", err)
 	}
 
-	if updateResp.Item.Name != "Updated" {
-		t.Errorf("UpdateData().Item.Name = %s, want Updated", updateResp.Item.Name)
+	if updateResp.Item.Name != "Обновлённый" {
+		t.Errorf("UpdateData().Item.Name = %s, ожидалось 'Обновлённый'", updateResp.Item.Name)
 	}
-	if updateResp.Item.Description != "Updated description" {
-		t.Errorf("UpdateData().Item.Description = %s, want Updated description", updateResp.Item.Description)
+	if updateResp.Item.Description != "Обновлённое описание" {
+		t.Errorf("UpdateData().Item.Description = %s, ожидалось 'Обновлённое описание'", updateResp.Item.Description)
 	}
 	if updateResp.Item.Value != 200.0 {
-		t.Errorf("UpdateData().Item.Value = %f, want 200.0", updateResp.Item.Value)
+		t.Errorf("UpdateData().Item.Value = %f, ожидалось 200.0", updateResp.Item.Value)
 	}
 }
 
-// TestUpdateDataNotFound тестирует обновление несуществующего элемента
+func TestUpdateDataPartial(t *testing.T) {
+	server, store := setupTestServer()
+
+	// Создаём элемент
+	id := store.Create(&DataItem{
+		Name:        "Оригинал",
+		Description: "Оригинальное описание",
+		Value:       100.0,
+	})
+
+	// Обновляем только имя
+	updateResp, err := server.UpdateData(context.Background(), &pb.UpdateRequest{
+		Id:          id,
+		Name:        "Только имя",
+		UpdateValue: false,
+	})
+	if err != nil {
+		t.Fatalf("UpdateData() ошибка = %v", err)
+	}
+
+	if updateResp.Item.Name != "Только имя" {
+		t.Errorf("UpdateData().Item.Name = %s, ожидалось 'Только имя'", updateResp.Item.Name)
+	}
+	// Описание и значение не должны измениться
+	if updateResp.Item.Description != "Оригинальное описание" {
+		t.Errorf("UpdateData().Item.Description = %s, ожидалось 'Оригинальное описание'", updateResp.Item.Description)
+	}
+	if updateResp.Item.Value != 100.0 {
+		t.Errorf("UpdateData().Item.Value = %f, ожидалось 100.0", updateResp.Item.Value)
+	}
+}
+
+func TestUpdateDataEmptyNameDoesNotOverwrite(t *testing.T) {
+	server, store := setupTestServer()
+
+	// Создаём элемент
+	id := store.Create(&DataItem{
+		Name:  "Оригинал",
+		Value: 100.0,
+	})
+
+	// Пытаемся обновить с пустым именем — имя не должно измениться
+	_, err := server.UpdateData(context.Background(), &pb.UpdateRequest{
+		Id:          id,
+		Name:        "",
+		UpdateValue: false,
+	})
+	if err != nil {
+		t.Fatalf("UpdateData() ошибка = %v", err)
+	}
+
+	item, _ := store.Get(id)
+	if item.Name != "Оригинал" {
+		t.Errorf("Имя изменилось на '%s', ожидалось 'Оригинал'", item.Name)
+	}
+}
+
+func TestUpdateDataWhitespaceNameDoesNotOverwrite(t *testing.T) {
+	server, store := setupTestServer()
+
+	// Создаём элемент
+	id := store.Create(&DataItem{
+		Name:  "Оригинал",
+		Value: 100.0,
+	})
+
+	// Пытаемся обновить с именем из одних пробелов — имя не должно измениться
+	_, err := server.UpdateData(context.Background(), &pb.UpdateRequest{
+		Id:          id,
+		Name:        "   ",
+		UpdateValue: false,
+	})
+	if err != nil {
+		t.Fatalf("UpdateData() ошибка = %v", err)
+	}
+
+	item, _ := store.Get(id)
+	if item.Name != "Оригинал" {
+		t.Errorf("Имя изменилось на '%s', ожидалось 'Оригинал'", item.Name)
+	}
+}
+
 func TestUpdateDataNotFound(t *testing.T) {
-	server := setupTestServer()
+	server, _ := setupTestServer()
 
 	_, err := server.UpdateData(context.Background(), &pb.UpdateRequest{
 		Id:    999,
-		Name:  "Updated",
+		Name:  "Обновлённый",
 		Value: 100.0,
 	})
 	if err == nil {
-		t.Error("UpdateData() should return error for non-existent item")
+		t.Error("UpdateData() должна вернуть ошибку для несуществующего элемента")
 	}
 }
 
-// TestDeleteData тестирует удаление элемента
+// --- Тесты удаления элемента ---
+
 func TestDeleteData(t *testing.T) {
-	server := setupTestServer()
+	server, store := setupTestServer()
 
 	// Создаём элемент
-	createResp, _ := server.CreateData(context.Background(), &pb.CreateRequest{
-		Name:  "To Delete",
+	id := store.Create(&DataItem{
+		Name:  "На удаление",
 		Value: 100.0,
 	})
 
 	// Удаляем элемент
 	deleteResp, err := server.DeleteData(context.Background(), &pb.DeleteRequest{
-		Id: createResp.Item.Id,
+		Id: id,
 	})
 	if err != nil {
-		t.Fatalf("DeleteData() error = %v", err)
+		t.Fatalf("DeleteData() ошибка = %v", err)
 	}
 
 	if !deleteResp.Success {
-		t.Error("DeleteData().Success should be true")
+		t.Error("DeleteData().Success должно быть true")
 	}
 
 	// Проверяем, что элемент действительно удалён
 	_, err = server.GetData(context.Background(), &pb.GetRequest{
-		Id: createResp.Item.Id,
+		Id: id,
 	})
 	if err == nil {
-		t.Error("GetData() should return error after deletion")
+		t.Error("GetData() должна вернуть ошибку после удаления")
 	}
 }
 
-// TestDeleteDataNotFound тестирует удаление несуществующего элемента
 func TestDeleteDataNotFound(t *testing.T) {
-	server := setupTestServer()
+	server, _ := setupTestServer()
 
 	_, err := server.DeleteData(context.Background(), &pb.DeleteRequest{
 		Id: 999,
 	})
 	if err == nil {
-		t.Error("DeleteData() should return error for non-existent item")
+		t.Error("DeleteData() должна вернуть ошибку для несуществующего элемента")
 	}
 }
 
-// TestInitSampleData тестирует инициализацию тестовых данных
-func TestInitSampleData(t *testing.T) {
-	server := setupTestServer()
-	initSampleData(server)
+// --- Тесты инициализации демонстрационных данных ---
 
-	if len(server.items) != 3 {
-		t.Errorf("initSampleData() created %d items, want 3", len(server.items))
+func TestInitSampleData(t *testing.T) {
+	store := NewItemStore()
+	store.InitSampleData()
+
+	if store.Count() != 3 {
+		t.Errorf("InitSampleData() создало %d элементов, ожидалось 3", store.Count())
 	}
-	if server.nextID != 4 {
-		t.Errorf("nextID = %d, want 4", server.nextID)
+	if store.nextID != 4 {
+		t.Errorf("nextID = %d, ожидалось 4", store.nextID)
 	}
 
 	// Проверяем, что все элементы имеют корректные данные
-	for id, item := range server.items {
+	for id, item := range store.items {
 		if item.ID != id {
-			t.Errorf("Item ID mismatch: %d != %d", item.ID, id)
+			t.Errorf("Несоответствие ID элемента: %d != %d", item.ID, id)
 		}
 		if item.Name == "" {
-			t.Errorf("Item %d has empty name", id)
+			t.Errorf("Элемент %d имеет пустое имя", id)
 		}
 	}
 }

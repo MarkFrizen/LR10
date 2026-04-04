@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// --- Helper ---
+// --- Вспомогательные функции ---
 
 func newTestApp() *App {
 	app := NewApp()
@@ -17,7 +17,7 @@ func newTestApp() *App {
 	return app
 }
 
-// --- Health Handler Tests ---
+// --- Тесты эндпоинта здоровья ---
 
 func TestHealthHandler(t *testing.T) {
 	app := newTestApp()
@@ -27,27 +27,27 @@ func TestHealthHandler(t *testing.T) {
 	app.healthHandler(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Errorf("expected %d, got %d", http.StatusOK, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusOK, w.Code)
 	}
 
 	contentType := w.Header().Get("Content-Type")
 	if contentType != "application/json" {
-		t.Errorf("expected application/json, got %s", contentType)
+		t.Errorf("ожидалось application/json, получено %s", contentType)
 	}
 
 	var response HealthResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
-	if response.Status != "healthy" {
-		t.Errorf("expected status 'healthy', got %s", response.Status)
+	if response.Status != "работает" {
+		t.Errorf("ожидался status 'работает', получено %s", response.Status)
 	}
-	if response.Version != "1.0.0" {
-		t.Errorf("expected version '1.0.0', got %s", response.Version)
+	if response.Version != apiVersion {
+		t.Errorf("ожидалась версия '%s', получено %s", apiVersion, response.Version)
 	}
 	if response.Timestamp == "" {
-		t.Error("expected non-empty timestamp")
+		t.Error("ожидался непустой timestamp")
 	}
 }
 
@@ -59,11 +59,11 @@ func TestHealthHandlerMethodNotAllowed(t *testing.T) {
 	app.healthHandler(w, req)
 
 	if w.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected %d, got %d", http.StatusMethodNotAllowed, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusMethodNotAllowed, w.Code)
 	}
 }
 
-// --- Stats Handler Tests ---
+// --- Тесты эндпоинта статистики ---
 
 func TestStatsHandler(t *testing.T) {
 	app := newTestApp()
@@ -73,22 +73,22 @@ func TestStatsHandler(t *testing.T) {
 	app.statsHandler(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Errorf("expected %d, got %d", http.StatusOK, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusOK, w.Code)
 	}
 
 	var response Stats
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
 	if response.RequestCount < 1 {
-		t.Errorf("expected RequestCount >= 1, got %d", response.RequestCount)
+		t.Errorf("ожидалось RequestCount >= 1, получено %d", response.RequestCount)
 	}
 	if response.Uptime == "" {
-		t.Error("expected non-empty uptime")
+		t.Error("ожидался непустой uptime")
 	}
 	if response.StartTime == "" {
-		t.Error("expected non-empty start_time")
+		t.Error("ожидался непустой start_time")
 	}
 }
 
@@ -100,23 +100,23 @@ func TestStatsHandlerMethodNotAllowed(t *testing.T) {
 	app.statsHandler(w, req)
 
 	if w.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected %d, got %d", http.StatusMethodNotAllowed, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusMethodNotAllowed, w.Code)
 	}
 }
 
-// --- Echo Handler Tests ---
+// --- Тесты эндпоинта «эхо» ---
 
 func TestEchoHandler(t *testing.T) {
 	app := newTestApp()
 
 	requestBody := EchoRequest{
-		Message: "Hello from test!",
-		Data:    map[string]interface{}{"key": "value", "number": 42},
+		Message: "Привет из теста!",
+		Data:    map[string]interface{}{"ключ": "значение", "число": 42},
 	}
 
 	jsonBody, err := json.Marshal(requestBody)
 	if err != nil {
-		t.Fatalf("JSON marshal error: %v", err)
+		t.Fatalf("Ошибка маршалинга JSON: %v", err)
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/echo", bytes.NewBuffer(jsonBody))
@@ -126,35 +126,35 @@ func TestEchoHandler(t *testing.T) {
 	app.echoHandler(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Errorf("expected %d, got %d", http.StatusOK, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusOK, w.Code)
 	}
 
 	var response EchoResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
-	if response.Original.Message != "Hello from test!" {
-		t.Errorf("expected message 'Hello from test!', got %s", response.Original.Message)
+	if response.Original.Message != "Привет из теста!" {
+		t.Errorf("ожидалось message 'Привет из теста!', получено %s", response.Original.Message)
 	}
 
-	expectedProcessed := "Received: Hello from test! (processed by Go API)"
-	if response.Processed != expectedProcessed {
-		t.Errorf("expected processed '%s', got %s", expectedProcessed, response.Processed)
+	expected := "Получено: Привет из теста! (обработано REST API)"
+	if response.Processed != expected {
+		t.Errorf("ожидалось processed '%s', получено %s", expected, response.Processed)
 	}
 }
 
 func TestEchoHandlerInvalidJSON(t *testing.T) {
 	app := newTestApp()
 
-	req := httptest.NewRequest(http.MethodPost, "/api/echo", bytes.NewBuffer([]byte(`{"message": "invalid`)))
+	req := httptest.NewRequest(http.MethodPost, "/api/echo", bytes.NewBuffer([]byte(`{"message": "некорректный`)))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
 	app.echoHandler(w, req)
 
 	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected %d, got %d", http.StatusBadRequest, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusBadRequest, w.Code)
 	}
 }
 
@@ -166,11 +166,11 @@ func TestEchoHandlerMethodNotAllowed(t *testing.T) {
 	app.echoHandler(w, req)
 
 	if w.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected %d, got %d", http.StatusMethodNotAllowed, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusMethodNotAllowed, w.Code)
 	}
 }
 
-// --- Request Counter Tests ---
+// --- Тесты счётчика запросов ---
 
 func TestRequestCounterIncrement(t *testing.T) {
 	rc := NewRequestCounter()
@@ -181,7 +181,7 @@ func TestRequestCounterIncrement(t *testing.T) {
 
 	stats := rc.Get()
 	if stats.RequestCount != 5 {
-		t.Errorf("expected count 5, got %d", stats.RequestCount)
+		t.Errorf("ожидалось 5, получено %d", stats.RequestCount)
 	}
 }
 
@@ -202,11 +202,11 @@ func TestConcurrentRequests(t *testing.T) {
 
 	stats := rc.Get()
 	if stats.RequestCount != 100 {
-		t.Errorf("expected count 100, got %d", stats.RequestCount)
+		t.Errorf("ожидалось 100, получено %d", stats.RequestCount)
 	}
 }
 
-// --- JSON Format Tests ---
+// --- Тесты формата JSON ---
 
 func TestHealthResponseJSONFormat(t *testing.T) {
 	app := newTestApp()
@@ -217,12 +217,12 @@ func TestHealthResponseJSONFormat(t *testing.T) {
 
 	var rawJSON map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
 	for _, field := range []string{"status", "timestamp", "version"} {
 		if _, exists := rawJSON[field]; !exists {
-			t.Errorf("missing field: %s", field)
+			t.Errorf("отсутствует поле: %s", field)
 		}
 	}
 }
@@ -236,12 +236,12 @@ func TestStatsResponseJSONFormat(t *testing.T) {
 
 	var rawJSON map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
 	for _, field := range []string{"request_count", "uptime", "start_time"} {
 		if _, exists := rawJSON[field]; !exists {
-			t.Errorf("missing field: %s", field)
+			t.Errorf("отсутствует поле: %s", field)
 		}
 	}
 }
@@ -249,7 +249,7 @@ func TestStatsResponseJSONFormat(t *testing.T) {
 func TestEchoResponseJSONFormat(t *testing.T) {
 	app := newTestApp()
 
-	jsonBody, _ := json.Marshal(EchoRequest{Message: "test"})
+	jsonBody, _ := json.Marshal(EchoRequest{Message: "тест"})
 	req := httptest.NewRequest(http.MethodPost, "/api/echo", bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -258,17 +258,17 @@ func TestEchoResponseJSONFormat(t *testing.T) {
 
 	var rawJSON map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
 	for _, field := range []string{"original", "processed", "timestamp"} {
 		if _, exists := rawJSON[field]; !exists {
-			t.Errorf("missing field: %s", field)
+			t.Errorf("отсутствует поле: %s", field)
 		}
 	}
 }
 
-// --- Posts Handler Tests ---
+// --- Тесты обработчиков постов ---
 
 func TestGetPostsHandler(t *testing.T) {
 	app := newTestApp()
@@ -278,22 +278,22 @@ func TestGetPostsHandler(t *testing.T) {
 	app.postsHandler(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Errorf("expected %d, got %d", http.StatusOK, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusOK, w.Code)
 	}
 
 	var response GetPostsResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
 	if response.Total == 0 {
-		t.Error("expected total > 0")
+		t.Error("ожидалось total > 0")
 	}
 	if response.Page != 1 {
-		t.Errorf("expected page 1, got %d", response.Page)
+		t.Errorf("ожидалась страница 1, получено %d", response.Page)
 	}
 	if len(response.Posts) == 0 {
-		t.Error("expected non-empty posts list")
+		t.Error("ожидался непустой список постов")
 	}
 }
 
@@ -305,16 +305,16 @@ func TestGetPostsHandlerPagination(t *testing.T) {
 	app.postsHandler(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Errorf("expected %d, got %d", http.StatusOK, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusOK, w.Code)
 	}
 
 	var response GetPostsResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
 	if len(response.Posts) > 2 {
-		t.Errorf("expected at most 2 posts, got %d", len(response.Posts))
+		t.Errorf("ожидалось не более 2 постов, получено %d", len(response.Posts))
 	}
 }
 
@@ -328,12 +328,12 @@ func TestGetPostsHandlerSorting(t *testing.T) {
 
 	var response GetPostsResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
 	for i := 1; i < len(response.Posts); i++ {
 		if response.Posts[i-1].ID < response.Posts[i].ID {
-			t.Errorf("posts not sorted by descending ID: [%d] = %d, [%d] = %d",
+			t.Errorf("посты не отсортированы по убыванию ID: [%d] = %d, [%d] = %d",
 				i-1, response.Posts[i-1].ID, i, response.Posts[i].ID)
 		}
 	}
@@ -343,10 +343,10 @@ func TestCreatePostHandler(t *testing.T) {
 	app := newTestApp()
 
 	createReq := CreatePostRequest{
-		Title:    "Test Post",
-		Content:  "Test content",
-		Excerpt:  "Test excerpt",
-		TagNames: []string{"Test", "Go"},
+		Title:    "Тестовый пост",
+		Content:  "Тестовое содержание",
+		Excerpt:  "Тестовое описание",
+		TagNames: []string{"Тест", "Go"},
 	}
 
 	jsonBody, _ := json.Marshal(createReq)
@@ -357,29 +357,29 @@ func TestCreatePostHandler(t *testing.T) {
 	app.postsHandler(w, req)
 
 	if w.Code != http.StatusCreated {
-		t.Errorf("expected %d, got %d", http.StatusCreated, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusCreated, w.Code)
 	}
 
 	var response CreatePostResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
 	if response.Post.Title != createReq.Title {
-		t.Errorf("expected title '%s', got '%s'", createReq.Title, response.Post.Title)
+		t.Errorf("ожидался заголовок '%s', получено '%s'", createReq.Title, response.Post.Title)
 	}
 	if len(response.Post.Tags) != 2 {
-		t.Errorf("expected 2 tags, got %d", len(response.Post.Tags))
+		t.Errorf("ожидалось 2 тега, получено %d", len(response.Post.Tags))
 	}
-	if response.Message != "Post created successfully" {
-		t.Errorf("expected message 'Post created successfully', got '%s'", response.Message)
+	if response.Message != "Пост успешно создан" {
+		t.Errorf("ожидалось сообщение 'Пост успешно создан', получено '%s'", response.Message)
 	}
 }
 
 func TestCreatePostHandlerEmptyTitle(t *testing.T) {
 	app := newTestApp()
 
-	jsonBody, _ := json.Marshal(CreatePostRequest{Title: "", Content: "content"})
+	jsonBody, _ := json.Marshal(CreatePostRequest{Title: "", Content: "содержание"})
 	req := httptest.NewRequest(http.MethodPost, "/api/posts", bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -387,14 +387,14 @@ func TestCreatePostHandlerEmptyTitle(t *testing.T) {
 	app.postsHandler(w, req)
 
 	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected %d, got %d", http.StatusBadRequest, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusBadRequest, w.Code)
 	}
 }
 
 func TestCreatePostHandlerEmptyContent(t *testing.T) {
 	app := newTestApp()
 
-	jsonBody, _ := json.Marshal(CreatePostRequest{Title: "Title", Content: ""})
+	jsonBody, _ := json.Marshal(CreatePostRequest{Title: "Заголовок", Content: ""})
 	req := httptest.NewRequest(http.MethodPost, "/api/posts", bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -402,11 +402,11 @@ func TestCreatePostHandlerEmptyContent(t *testing.T) {
 	app.postsHandler(w, req)
 
 	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected %d, got %d", http.StatusBadRequest, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusBadRequest, w.Code)
 	}
 }
 
-// --- Post By ID Handler Tests ---
+// --- Тесты получения поста по ID ---
 
 func TestGetPostByIDHandler(t *testing.T) {
 	app := newTestApp()
@@ -416,19 +416,19 @@ func TestGetPostByIDHandler(t *testing.T) {
 	app.postByIDHandler(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Errorf("expected %d, got %d", http.StatusOK, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusOK, w.Code)
 	}
 
 	var response PostResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
 	if response.Post.ID != 1 {
-		t.Errorf("expected ID 1, got %d", response.Post.ID)
+		t.Errorf("ожидался ID 1, получено %d", response.Post.ID)
 	}
 	if response.Post.Author == nil {
-		t.Error("expected non-nil author")
+		t.Error("ожидался непустой author")
 	}
 }
 
@@ -440,20 +440,20 @@ func TestGetPostByIDHandlerNotFound(t *testing.T) {
 	app.postByIDHandler(w, req)
 
 	if w.Code != http.StatusNotFound {
-		t.Errorf("expected %d, got %d", http.StatusNotFound, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusNotFound, w.Code)
 	}
 
 	var errorResp ErrorResponse
 	if err := json.NewDecoder(w.Body).Decode(&errorResp); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
-	if errorResp.Message != "Post not found" {
-		t.Errorf("expected message 'Post not found', got '%s'", errorResp.Message)
+	if errorResp.Message != "Пост не найден" {
+		t.Errorf("ожидалось сообщение 'Пост не найден', получено '%s'", errorResp.Message)
 	}
 }
 
-// --- Update Post Handler Tests ---
+// --- Тесты обновления поста ---
 
 func TestUpdatePostHandler(t *testing.T) {
 	app := newTestApp()
@@ -461,24 +461,24 @@ func TestUpdatePostHandler(t *testing.T) {
 	// Создаём тестовый пост
 	store := app.GetStore()
 	store.Create(Post{
-		Title:   "Original Title",
-		Content: "Original content",
-		Author:  &Author{ID: 1, Username: "test", Email: "test@test.com"},
+		Title:   "Оригинальный заголовок",
+		Content: "Оригинальное содержание",
+		Author:  &Author{ID: 1, Username: "тест", Email: "test@test.com"},
 	})
 	// Получаем ID созданного поста
 	allPosts, _ := store.GetAll(1, 100)
 	var testPostID int64
 	for _, p := range allPosts {
-		if p.Title == "Original Title" {
+		if p.Title == "Оригинальный заголовок" {
 			testPostID = p.ID
 			break
 		}
 	}
 
 	updateReq := UpdatePostRequest{
-		Title:    "Updated Title",
-		Excerpt:  "New excerpt",
-		TagNames: []string{"Updated"},
+		Title:    "Обновлённый заголовок",
+		Excerpt:  "Новое описание",
+		TagNames: []string{"Обновлено"},
 	}
 
 	jsonBody, _ := json.Marshal(updateReq)
@@ -489,26 +489,26 @@ func TestUpdatePostHandler(t *testing.T) {
 	app.postByIDHandler(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Errorf("expected %d, got %d", http.StatusOK, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusOK, w.Code)
 	}
 
 	var response PostResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
-	if response.Post.Title != "Updated Title" {
-		t.Errorf("expected title 'Updated Title', got '%s'", response.Post.Title)
+	if response.Post.Title != "Обновлённый заголовок" {
+		t.Errorf("ожидался заголовок 'Обновлённый заголовок', получено '%s'", response.Post.Title)
 	}
-	if response.Post.Excerpt != "New excerpt" {
-		t.Errorf("expected excerpt 'New excerpt', got '%s'", response.Post.Excerpt)
+	if response.Post.Excerpt != "Новое описание" {
+		t.Errorf("ожидалось описание 'Новое описание', получено '%s'", response.Post.Excerpt)
 	}
 }
 
 func TestUpdatePostHandlerNotFound(t *testing.T) {
 	app := newTestApp()
 
-	jsonBody, _ := json.Marshal(UpdatePostRequest{Title: "Updated"})
+	jsonBody, _ := json.Marshal(UpdatePostRequest{Title: "Обновлённый"})
 	req := httptest.NewRequest(http.MethodPut, "/api/posts/9999", bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -516,20 +516,20 @@ func TestUpdatePostHandlerNotFound(t *testing.T) {
 	app.postByIDHandler(w, req)
 
 	if w.Code != http.StatusNotFound {
-		t.Errorf("expected %d, got %d", http.StatusNotFound, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusNotFound, w.Code)
 	}
 }
 
-// --- Delete Post Handler Tests ---
+// --- Тесты удаления поста ---
 
 func TestDeletePostHandler(t *testing.T) {
 	app := newTestApp()
 
 	store := app.GetStore()
 	id := store.Create(Post{
-		Title:   "To Delete",
-		Content: "Will be deleted",
-		Author:  &Author{ID: 1, Username: "test", Email: "test@test.com"},
+		Title:   "На удаление",
+		Content: "Будет удалён",
+		Author:  &Author{ID: 1, Username: "тест", Email: "test@test.com"},
 	})
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/posts/"+formatID(id), nil)
@@ -538,12 +538,12 @@ func TestDeletePostHandler(t *testing.T) {
 	app.postByIDHandler(w, req)
 
 	if w.Code != http.StatusNoContent {
-		t.Errorf("expected %d, got %d", http.StatusNoContent, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusNoContent, w.Code)
 	}
 
 	_, exists := store.GetByID(id)
 	if exists {
-		t.Error("expected post to be deleted")
+		t.Error("ожидалось, что пост будет удалён")
 	}
 }
 
@@ -555,7 +555,7 @@ func TestDeletePostHandlerNotFound(t *testing.T) {
 	app.postByIDHandler(w, req)
 
 	if w.Code != http.StatusNotFound {
-		t.Errorf("expected %d, got %d", http.StatusNotFound, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusNotFound, w.Code)
 	}
 }
 
@@ -567,7 +567,7 @@ func TestPostByIDHandlerInvalidID(t *testing.T) {
 	app.postByIDHandler(w, req)
 
 	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected %d, got %d", http.StatusBadRequest, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusBadRequest, w.Code)
 	}
 }
 
@@ -579,19 +579,19 @@ func TestPostsHandlerMethodNotAllowed(t *testing.T) {
 	app.postsHandler(w, req)
 
 	if w.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected %d, got %d", http.StatusMethodNotAllowed, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusMethodNotAllowed, w.Code)
 	}
 }
 
-// --- Post Response JSON Format Tests ---
+// --- Тесты формата ответа поста ---
 
 func TestPostComplexJSONStructure(t *testing.T) {
 	app := newTestApp()
 
 	createReq := CreatePostRequest{
-		Title:    "Complex Post",
-		Content:  "Content with complex structure",
-		TagNames: []string{"Tag1", "Tag2", "Tag3", "Tag4", "Tag5"},
+		Title:    "Сложный пост",
+		Content:  "Содержание сложной структуры",
+		TagNames: []string{"Тег1", "Тег2", "Тег3", "Тег4", "Тег5"},
 	}
 
 	jsonBody, _ := json.Marshal(createReq)
@@ -603,32 +603,32 @@ func TestPostComplexJSONStructure(t *testing.T) {
 
 	var rawJSON map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
 	for _, field := range []string{"post", "message", "timestamp"} {
 		if _, exists := rawJSON[field]; !exists {
-			t.Errorf("missing field: %s", field)
+			t.Errorf("отсутствует поле: %s", field)
 		}
 	}
 
 	postData, ok := rawJSON["post"].(map[string]interface{})
 	if !ok {
-		t.Fatal("field 'post' is not an object")
+		t.Fatal("поле 'post' не является объектом")
 	}
 
 	for _, field := range []string{"id", "title", "slug", "content", "author", "tags", "view_count", "created_at"} {
 		if _, exists := postData[field]; !exists {
-			t.Errorf("missing field in post: %s", field)
+			t.Errorf("отсутствует поле в post: %s", field)
 		}
 	}
 
 	tagsData, ok := postData["tags"].([]interface{})
 	if !ok {
-		t.Fatal("field 'tags' is not an array")
+		t.Fatal("поле 'tags' не является массивом")
 	}
 	if len(tagsData) != 5 {
-		t.Errorf("expected 5 tags, got %d", len(tagsData))
+		t.Errorf("ожидалось 5 тегов, получено %d", len(tagsData))
 	}
 }
 
@@ -641,12 +641,12 @@ func TestGetPostsResponseJSONFormat(t *testing.T) {
 
 	var rawJSON map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
 	for _, field := range []string{"posts", "total", "page", "per_page", "timestamp"} {
 		if _, exists := rawJSON[field]; !exists {
-			t.Errorf("missing field: %s", field)
+			t.Errorf("отсутствует поле: %s", field)
 		}
 	}
 }
@@ -654,7 +654,7 @@ func TestGetPostsResponseJSONFormat(t *testing.T) {
 func TestCreatePostResponseJSONFormat(t *testing.T) {
 	app := newTestApp()
 
-	jsonBody, _ := json.Marshal(CreatePostRequest{Title: "Format Test", Content: "Content"})
+	jsonBody, _ := json.Marshal(CreatePostRequest{Title: "Тест формата", Content: "Содержание"})
 	req := httptest.NewRequest(http.MethodPost, "/api/posts", bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -663,12 +663,12 @@ func TestCreatePostResponseJSONFormat(t *testing.T) {
 
 	var rawJSON map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
 	for _, field := range []string{"post", "message", "timestamp"} {
 		if _, exists := rawJSON[field]; !exists {
-			t.Errorf("missing field: %s", field)
+			t.Errorf("отсутствует поле: %s", field)
 		}
 	}
 }
@@ -682,12 +682,12 @@ func TestPostResponseJSONFormat(t *testing.T) {
 
 	var rawJSON map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
 	for _, field := range []string{"post", "timestamp"} {
 		if _, exists := rawJSON[field]; !exists {
-			t.Errorf("missing field: %s", field)
+			t.Errorf("отсутствует поле: %s", field)
 		}
 	}
 }
@@ -701,12 +701,12 @@ func TestErrorResponseJSONFormat(t *testing.T) {
 
 	var rawJSON map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
 	for _, field := range []string{"error", "message", "timestamp"} {
 		if _, exists := rawJSON[field]; !exists {
-			t.Errorf("missing field: %s", field)
+			t.Errorf("отсутствует поле: %s", field)
 		}
 	}
 }
@@ -720,17 +720,17 @@ func TestAuthorNestedStructure(t *testing.T) {
 
 	var response PostResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
 	if response.Post.Author == nil {
-		t.Fatal("Author must be set")
+		t.Fatal("Author должен быть установлен")
 	}
 	if response.Post.Author.Username == "" {
-		t.Error("Author username must not be empty")
+		t.Error("Username автора не должен быть пустым")
 	}
 	if response.Post.Author.Email == "" {
-		t.Error("Author email must not be empty")
+		t.Error("Email автора не должен быть пустым")
 	}
 }
 
@@ -738,9 +738,9 @@ func TestTagsArrayStructure(t *testing.T) {
 	app := newTestApp()
 
 	jsonBody, _ := json.Marshal(CreatePostRequest{
-		Title:    "Tag Test",
-		Content:  "Content",
-		TagNames: []string{"Go", "API", "Testing"},
+		Title:    "Тест тегов",
+		Content:  "Содержание",
+		TagNames: []string{"Go", "API", "Тестирование"},
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/posts", bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
@@ -750,19 +750,19 @@ func TestTagsArrayStructure(t *testing.T) {
 
 	var response CreatePostResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
 	if len(response.Post.Tags) != 3 {
-		t.Errorf("expected 3 tags, got %d", len(response.Post.Tags))
+		t.Errorf("ожидалось 3 тега, получено %d", len(response.Post.Tags))
 	}
 
 	for _, tag := range response.Post.Tags {
 		if tag.Name == "" {
-			t.Error("Tag name must not be empty")
+			t.Error("Название тега не должно быть пустым")
 		}
 		if tag.Slug == "" {
-			t.Error("Tag slug must not be empty")
+			t.Error("Slug тега не должен быть пустым")
 		}
 	}
 }
@@ -777,7 +777,7 @@ func TestViewCountIncrement(t *testing.T) {
 
 	var resp1 PostResponse
 	if err := json.NewDecoder(w1.Body).Decode(&resp1); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 	firstCount := resp1.Post.ViewCount
 
@@ -788,11 +788,11 @@ func TestViewCountIncrement(t *testing.T) {
 
 	var resp2 PostResponse
 	if err := json.NewDecoder(w2.Body).Decode(&resp2); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
 	if resp2.Post.ViewCount != firstCount+1 {
-		t.Errorf("expected view count %d, got %d", firstCount+1, resp2.Post.ViewCount)
+		t.Errorf("ожидался счётчик %d, получено %d", firstCount+1, resp2.Post.ViewCount)
 	}
 }
 
@@ -801,14 +801,14 @@ func TestUpdatePostPartialUpdate(t *testing.T) {
 
 	store := app.GetStore()
 	id := store.Create(Post{
-		Title:   "Original",
-		Content: "Original content",
-		Excerpt: "Original excerpt",
-		Author:  &Author{ID: 1, Username: "test", Email: "test@test.com"},
+		Title:   "Оригинал",
+		Content: "Оригинальное содержание",
+		Excerpt: "Оригинальное описание",
+		Author:  &Author{ID: 1, Username: "тест", Email: "test@test.com"},
 	})
 
 	// Обновляем только заголовок
-	updateReq := UpdatePostRequest{Title: "Updated Title"}
+	updateReq := UpdatePostRequest{Title: "Обновлённый заголовок"}
 	jsonBody, _ := json.Marshal(updateReq)
 	req := httptest.NewRequest(http.MethodPut, "/api/posts/"+formatID(id), bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
@@ -817,24 +817,90 @@ func TestUpdatePostPartialUpdate(t *testing.T) {
 	app.postByIDHandler(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Errorf("expected %d, got %d", http.StatusOK, w.Code)
+		t.Errorf("ожидалось %d, получено %d", http.StatusOK, w.Code)
 	}
 
 	var response PostResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("JSON decode error: %v", err)
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
 	}
 
-	if response.Post.Title != "Updated Title" {
-		t.Errorf("expected title 'Updated Title', got '%s'", response.Post.Title)
+	if response.Post.Title != "Обновлённый заголовок" {
+		t.Errorf("ожидался заголовок 'Обновлённый заголовок', получено '%s'", response.Post.Title)
 	}
-	// Content должен остаться прежним
-	if response.Post.Content != "Original content" {
-		t.Errorf("expected content 'Original content', got '%s'", response.Post.Content)
+	// Содержание должно остаться прежним
+	if response.Post.Content != "Оригинальное содержание" {
+		t.Errorf("ожидалось содержание 'Оригинальное содержание', получено '%s'", response.Post.Content)
 	}
 }
 
-// --- Integration Test ---
+// --- Тесты создания поста с указанием автора ---
+
+func TestCreatePostWithAuthorID(t *testing.T) {
+	app := newTestApp()
+
+	// Создаём пост с указанием ID автора
+	jsonBody, _ := json.Marshal(CreatePostRequest{
+		Title:    "Пост с автором",
+		Content:  "Содержание",
+		AuthorID: 1,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/posts", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	app.postsHandler(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("ожидалось %d, получено %d", http.StatusCreated, w.Code)
+	}
+
+	var response CreatePostResponse
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+	}
+
+	if response.Post.Author == nil {
+		t.Fatal("Author должен быть установлен")
+	}
+	if response.Post.Author.ID != 1 {
+		t.Errorf("ожидался Author.ID = 1, получено %d", response.Post.Author.ID)
+	}
+	if response.Post.Author.Username != "john_blogger" {
+		t.Errorf("ожидался Username 'john_blogger', получено '%s'", response.Post.Author.Username)
+	}
+}
+
+func TestCreatePostWithUnknownAuthor(t *testing.T) {
+	app := newTestApp()
+
+	// Создаём пост с несуществующим ID автора
+	jsonBody, _ := json.Marshal(CreatePostRequest{
+		Title:    "Пост с неизвестным автором",
+		Content:  "Содержание",
+		AuthorID: 999,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/posts", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	app.postsHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("ожидалось %d, получено %d", http.StatusBadRequest, w.Code)
+	}
+
+	var errorResp ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&errorResp); err != nil {
+		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+	}
+
+	if errorResp.Message == "" {
+		t.Error("ожидалось сообщение об ошибке")
+	}
+}
+
+// --- Интеграционный тест ---
 
 func TestIntegrationAllEndpoints(t *testing.T) {
 	app := newTestApp()
@@ -842,50 +908,50 @@ func TestIntegrationAllEndpoints(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	// Health
+	// Здоровье
 	resp, err := http.Get(server.URL + "/health")
 	if err != nil {
-		t.Fatalf("request error: %v", err)
+		t.Fatalf("ошибка запроса: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("health: expected 200, got %d", resp.StatusCode)
+		t.Errorf("здоровье: ожидалось 200, получено %d", resp.StatusCode)
 	}
 
-	// Stats
+	// Статистика
 	resp, err = http.Get(server.URL + "/api/stats")
 	if err != nil {
-		t.Fatalf("request error: %v", err)
+		t.Fatalf("ошибка запроса: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("stats: expected 200, got %d", resp.StatusCode)
+		t.Errorf("статистика: ожидалось 200, получено %d", resp.StatusCode)
 	}
 
-	// Echo
-	echoReq := EchoRequest{Message: "integration test"}
+	// Эхо
+	echoReq := EchoRequest{Message: "интеграционный тест"}
 	jsonBody, _ := json.Marshal(echoReq)
 	resp, err = http.Post(server.URL+"/api/echo", "application/json", bytes.NewBuffer(jsonBody))
 	if err != nil {
-		t.Fatalf("request error: %v", err)
+		t.Fatalf("ошибка запроса: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("echo: expected 200, got %d", resp.StatusCode)
+		t.Errorf("эхо: ожидалось 200, получено %d", resp.StatusCode)
 	}
 
-	// Posts
+	// Посты
 	resp, err = http.Get(server.URL + "/api/posts")
 	if err != nil {
-		t.Fatalf("request error: %v", err)
+		t.Fatalf("ошибка запроса: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("posts: expected 200, got %d", resp.StatusCode)
+		t.Errorf("посты: ожидалось 200, получено %d", resp.StatusCode)
 	}
 }
 
-// Helper: форматирование ID в строку для URL
+// formatID — форматирование ID в строку для URL
 func formatID(id int64) string {
 	return strconv.FormatInt(id, 10)
 }
