@@ -5,26 +5,224 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strconv"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
 )
+
+// --- Mock-реализации репозиториев ---
+
+// MockAuthorRepository — мок хранилища авторов
+type MockAuthorRepository struct {
+	authors map[int64]*Author
+}
+
+func NewMockAuthorRepository() *MockAuthorRepository {
+	r := &MockAuthorRepository{
+		authors: make(map[int64]*Author),
+	}
+	r.authors[defaultAuthorID] = &Author{
+		ID:        defaultAuthorID,
+		Username:  "john_blogger",
+		Email:     "john@example.com",
+		Bio:       "Разработчик и технический писатель",
+		AvatarURL: "https://example.com/avatars/john.jpg",
+	}
+	return r
+}
+
+func (m *MockAuthorRepository) GetByID(id int64) (*Author, bool) {
+	a, ok := m.authors[id]
+	return a, ok
+}
+
+func (m *MockAuthorRepository) Add(author *Author) {
+	m.authors[author.ID] = author
+}
+
+// MockPostRepository — мок хранилища постов
+type MockPostRepository struct {
+	mu     sync.RWMutex
+	posts  map[int64]Post
+	nextID int64
+}
+
+func NewMockPostRepository() *MockPostRepository {
+	return &MockPostRepository{
+		posts:  make(map[int64]Post),
+		nextID: 1,
+	}
+}
+
+func (m *MockPostRepository) GetAll(page, perPage int) ([]Post, int) {
+	m.mu.RLock()
+	allPosts := make([]Post, 0, len(m.posts))
+	for _, post := range m.posts {
+		allPosts = append(allPosts, post)
+	}
+	m.mu.RUnlock()
+
+	sort.Slice(allPosts, func(i, j int) bool {
+		return allPosts[i].ID > allPosts[j].ID
+	})
+
+	total := len(allPosts)
+	start := (page - 1) * perPage
+	end := start + perPage
+
+	if start >= total {
+		return []Post{}, total
+	}
+	if end > total {
+		end = total
+	}
+
+	return allPosts[start:end], total
+}
+
+func (m *MockPostRepository) GetByID(id int64) (Post, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	post, ok := m.posts[id]
+	return post, ok
+}
+
+func (m *MockPostRepository) Create(post Post) int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id := m.nextID
+	post.ID = id
+	m.nextID++
+	m.posts[id] = post
+	return id
+}
+
+func (m *MockPostRepository) Update(id int64, req UpdatePostRequest) (Post, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	post, ok := m.posts[id]
+	if !ok {
+		return Post{}, false
+	}
+	if req.Title != "" {
+		post.Title = req.Title
+		post.Slug = makeSlug(req.Title)
+	}
+	if req.Content != "" {
+		post.Content = req.Content
+	}
+	if req.Excerpt != "" {
+		post.Excerpt = req.Excerpt
+	}
+	if len(req.TagNames) > 0 {
+		post.Tags = makeTagsFromNames(req.TagNames)
+	}
+	post.UpdatedAt = makeTime()
+	m.posts[id] = post
+	return post, true
+}
+
+func (m *MockPostRepository) Delete(id int64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.posts[id]
+	if !ok {
+		return false
+	}
+	delete(m.posts, id)
+	return true
+}
+
+func (m *MockPostRepository) IncrementViewCount(id int64) (Post, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	post, ok := m.posts[id]
+	if !ok {
+		return Post{}, false
+	}
+	post.ViewCount++
+	m.posts[id] = post
+	return post, true
+}
+
+func makeTime() time.Time { return time.Now() }
 
 // --- Вспомогательные функции ---
 
 func newTestApp() *App {
-	app := NewApp()
+	authorRepo := NewMockAuthorRepository()
+	postRepo := NewMockPostRepository()
+	counter := NewRequestCounter()
+
+	// Заполняем демо-данными
+	postRepo.Create(Post{
+		ID:        1,
+		Title:     "Введение в Go API",
+		Slug:      "introduction-to-go-api",
+		Content:   "Go (Golang) — это мощный язык программирования...",
+		Excerpt:   "Изучаем основы создания API на Go",
+		Author:    &Author{ID: 1, Username: "john_blogger", Email: "john@example.com"},
+		Tags:      []Tag{{ID: 1, Name: "Go", Slug: "go"}},
+		ViewCount: 150,
+		CreatedAt: makeTime(),
+	})
+	postRepo.Create(Post{
+		ID:        2,
+		Title:     "Работа с JSON в Go",
+		Slug:      "working-with-json-in-go",
+		Content:   "Обработка JSON — одна из самых частых задач...",
+		Excerpt:   "Полное руководство по encoding/json",
+		Author:    &Author{ID: 1, Username: "john_blogger", Email: "john@example.com"},
+		Tags:      []Tag{{ID: 1, Name: "Go", Slug: "go"}},
+		ViewCount: 89,
+		CreatedAt: makeTime(),
+	})
+	postRepo.Create(Post{
+		ID:        3,
+		Title:     "Микросервисы: лучшие практики",
+		Slug:      "microservices-best-practices",
+		Content:   "При проектировании микросервисной архитектуры...",
+		Excerpt:   "Советы по построению микросервисов",
+		Author:    &Author{ID: 1, Username: "john_blogger", Email: "john@example.com"},
+		Tags:      []Tag{{ID: 2, Name: "Backend", Slug: "backend"}},
+		ViewCount: 234,
+		CreatedAt: makeTime(),
+	})
+
+	app := NewApp(AppOptions{
+		AuthorRepo: authorRepo,
+		PostRepo:   postRepo,
+		Counter:    counter,
+	})
 	app.SetupHTTP()
 	return app
+}
+
+func performRequest(r http.Handler, method, path string) *httptest.ResponseRecorder {
+	req, _ := http.NewRequest(method, path, nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+func performRequestWithBody(r http.Handler, method, path string, body []byte) *httptest.ResponseRecorder {
+	req, _ := http.NewRequest(method, path, bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
 }
 
 // --- Тесты эндпоинта здоровья ---
 
 func TestHealthHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	w := httptest.NewRecorder()
-
-	app.healthHandler(w, req)
+	w := performRequest(app.engine, http.MethodGet, "/health")
 
 	if w.Code != http.StatusOK {
 		t.Errorf("ожидалось %d, получено %d", http.StatusOK, w.Code)
@@ -37,7 +235,7 @@ func TestHealthHandler(t *testing.T) {
 
 	var response HealthResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	if response.Status != "работает" {
@@ -52,11 +250,9 @@ func TestHealthHandler(t *testing.T) {
 }
 
 func TestHealthHandlerMethodNotAllowed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
-	req := httptest.NewRequest(http.MethodPost, "/health", nil)
-	w := httptest.NewRecorder()
-
-	app.healthHandler(w, req)
+	w := performRequest(app.engine, http.MethodPost, "/health")
 
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("ожидалось %d, получено %d", http.StatusMethodNotAllowed, w.Code)
@@ -66,11 +262,9 @@ func TestHealthHandlerMethodNotAllowed(t *testing.T) {
 // --- Тесты эндпоинта статистики ---
 
 func TestStatsHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
-	req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
-	w := httptest.NewRecorder()
-
-	app.statsHandler(w, req)
+	w := performRequest(app.engine, http.MethodGet, "/api/stats")
 
 	if w.Code != http.StatusOK {
 		t.Errorf("ожидалось %d, получено %d", http.StatusOK, w.Code)
@@ -78,7 +272,7 @@ func TestStatsHandler(t *testing.T) {
 
 	var response Stats
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	if response.RequestCount < 1 {
@@ -93,11 +287,9 @@ func TestStatsHandler(t *testing.T) {
 }
 
 func TestStatsHandlerMethodNotAllowed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
-	req := httptest.NewRequest(http.MethodPost, "/api/stats", nil)
-	w := httptest.NewRecorder()
-
-	app.statsHandler(w, req)
+	w := performRequest(app.engine, http.MethodPost, "/api/stats")
 
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("ожидалось %d, получено %d", http.StatusMethodNotAllowed, w.Code)
@@ -107,6 +299,7 @@ func TestStatsHandlerMethodNotAllowed(t *testing.T) {
 // --- Тесты эндпоинта «эхо» ---
 
 func TestEchoHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
 
 	requestBody := EchoRequest{
@@ -119,11 +312,7 @@ func TestEchoHandler(t *testing.T) {
 		t.Fatalf("Ошибка маршалинга JSON: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/echo", bytes.NewBuffer(jsonBody))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	app.echoHandler(w, req)
+	w := performRequestWithBody(app.engine, http.MethodPost, "/api/echo", jsonBody)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("ожидалось %d, получено %d", http.StatusOK, w.Code)
@@ -131,7 +320,7 @@ func TestEchoHandler(t *testing.T) {
 
 	var response EchoResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	if response.Original.Message != "Привет из теста!" {
@@ -145,13 +334,10 @@ func TestEchoHandler(t *testing.T) {
 }
 
 func TestEchoHandlerInvalidJSON(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
 
-	req := httptest.NewRequest(http.MethodPost, "/api/echo", bytes.NewBuffer([]byte(`{"message": "некорректный`)))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	app.echoHandler(w, req)
+	w := performRequestWithBody(app.engine, http.MethodPost, "/api/echo", []byte(`{"message": "некорректный`))
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("ожидалось %d, получено %d", http.StatusBadRequest, w.Code)
@@ -159,11 +345,9 @@ func TestEchoHandlerInvalidJSON(t *testing.T) {
 }
 
 func TestEchoHandlerMethodNotAllowed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
-	req := httptest.NewRequest(http.MethodGet, "/api/echo", nil)
-	w := httptest.NewRecorder()
-
-	app.echoHandler(w, req)
+	w := performRequest(app.engine, http.MethodGet, "/api/echo")
 
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("ожидалось %d, получено %d", http.StatusMethodNotAllowed, w.Code)
@@ -209,15 +393,13 @@ func TestConcurrentRequests(t *testing.T) {
 // --- Тесты формата JSON ---
 
 func TestHealthResponseJSONFormat(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	w := httptest.NewRecorder()
-
-	app.healthHandler(w, req)
+	w := performRequest(app.engine, http.MethodGet, "/health")
 
 	var rawJSON map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	for _, field := range []string{"status", "timestamp", "version"} {
@@ -228,15 +410,13 @@ func TestHealthResponseJSONFormat(t *testing.T) {
 }
 
 func TestStatsResponseJSONFormat(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
-	req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
-	w := httptest.NewRecorder()
-
-	app.statsHandler(w, req)
+	w := performRequest(app.engine, http.MethodGet, "/api/stats")
 
 	var rawJSON map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	for _, field := range []string{"request_count", "uptime", "start_time"} {
@@ -247,18 +427,15 @@ func TestStatsResponseJSONFormat(t *testing.T) {
 }
 
 func TestEchoResponseJSONFormat(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
 
 	jsonBody, _ := json.Marshal(EchoRequest{Message: "тест"})
-	req := httptest.NewRequest(http.MethodPost, "/api/echo", bytes.NewBuffer(jsonBody))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	app.echoHandler(w, req)
+	w := performRequestWithBody(app.engine, http.MethodPost, "/api/echo", jsonBody)
 
 	var rawJSON map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	for _, field := range []string{"original", "processed", "timestamp"} {
@@ -271,11 +448,9 @@ func TestEchoResponseJSONFormat(t *testing.T) {
 // --- Тесты обработчиков постов ---
 
 func TestGetPostsHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
-	req := httptest.NewRequest(http.MethodGet, "/api/posts", nil)
-	w := httptest.NewRecorder()
-
-	app.postsHandler(w, req)
+	w := performRequest(app.engine, http.MethodGet, "/api/posts")
 
 	if w.Code != http.StatusOK {
 		t.Errorf("ожидалось %d, получено %d", http.StatusOK, w.Code)
@@ -283,7 +458,7 @@ func TestGetPostsHandler(t *testing.T) {
 
 	var response GetPostsResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	if response.Total == 0 {
@@ -298,11 +473,9 @@ func TestGetPostsHandler(t *testing.T) {
 }
 
 func TestGetPostsHandlerPagination(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
-	req := httptest.NewRequest(http.MethodGet, "/api/posts?page=1&per_page=2", nil)
-	w := httptest.NewRecorder()
-
-	app.postsHandler(w, req)
+	w := performRequest(app.engine, http.MethodGet, "/api/posts?page=1&per_page=2")
 
 	if w.Code != http.StatusOK {
 		t.Errorf("ожидалось %d, получено %d", http.StatusOK, w.Code)
@@ -310,7 +483,7 @@ func TestGetPostsHandlerPagination(t *testing.T) {
 
 	var response GetPostsResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	if len(response.Posts) > 2 {
@@ -320,15 +493,13 @@ func TestGetPostsHandlerPagination(t *testing.T) {
 
 // Проверка, что посты отсортированы по ID (новые первыми)
 func TestGetPostsHandlerSorting(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
-	req := httptest.NewRequest(http.MethodGet, "/api/posts?per_page=10", nil)
-	w := httptest.NewRecorder()
-
-	app.postsHandler(w, req)
+	w := performRequest(app.engine, http.MethodGet, "/api/posts?per_page=10")
 
 	var response GetPostsResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	for i := 1; i < len(response.Posts); i++ {
@@ -340,6 +511,7 @@ func TestGetPostsHandlerSorting(t *testing.T) {
 }
 
 func TestCreatePostHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
 
 	createReq := CreatePostRequest{
@@ -350,11 +522,7 @@ func TestCreatePostHandler(t *testing.T) {
 	}
 
 	jsonBody, _ := json.Marshal(createReq)
-	req := httptest.NewRequest(http.MethodPost, "/api/posts", bytes.NewBuffer(jsonBody))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	app.postsHandler(w, req)
+	w := performRequestWithBody(app.engine, http.MethodPost, "/api/posts", jsonBody)
 
 	if w.Code != http.StatusCreated {
 		t.Errorf("ожидалось %d, получено %d", http.StatusCreated, w.Code)
@@ -362,7 +530,7 @@ func TestCreatePostHandler(t *testing.T) {
 
 	var response CreatePostResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	if response.Post.Title != createReq.Title {
@@ -377,14 +545,11 @@ func TestCreatePostHandler(t *testing.T) {
 }
 
 func TestCreatePostHandlerEmptyTitle(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
 
 	jsonBody, _ := json.Marshal(CreatePostRequest{Title: "", Content: "содержание"})
-	req := httptest.NewRequest(http.MethodPost, "/api/posts", bytes.NewBuffer(jsonBody))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	app.postsHandler(w, req)
+	w := performRequestWithBody(app.engine, http.MethodPost, "/api/posts", jsonBody)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("ожидалось %d, получено %d", http.StatusBadRequest, w.Code)
@@ -392,14 +557,11 @@ func TestCreatePostHandlerEmptyTitle(t *testing.T) {
 }
 
 func TestCreatePostHandlerEmptyContent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
 
 	jsonBody, _ := json.Marshal(CreatePostRequest{Title: "Заголовок", Content: ""})
-	req := httptest.NewRequest(http.MethodPost, "/api/posts", bytes.NewBuffer(jsonBody))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	app.postsHandler(w, req)
+	w := performRequestWithBody(app.engine, http.MethodPost, "/api/posts", jsonBody)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("ожидалось %d, получено %d", http.StatusBadRequest, w.Code)
@@ -409,11 +571,9 @@ func TestCreatePostHandlerEmptyContent(t *testing.T) {
 // --- Тесты получения поста по ID ---
 
 func TestGetPostByIDHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
-	req := httptest.NewRequest(http.MethodGet, "/api/posts/1", nil)
-	w := httptest.NewRecorder()
-
-	app.postByIDHandler(w, req)
+	w := performRequest(app.engine, http.MethodGet, "/api/posts/1")
 
 	if w.Code != http.StatusOK {
 		t.Errorf("ожидалось %d, получено %d", http.StatusOK, w.Code)
@@ -421,7 +581,7 @@ func TestGetPostByIDHandler(t *testing.T) {
 
 	var response PostResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	if response.Post.ID != 1 {
@@ -433,11 +593,9 @@ func TestGetPostByIDHandler(t *testing.T) {
 }
 
 func TestGetPostByIDHandlerNotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
-	req := httptest.NewRequest(http.MethodGet, "/api/posts/9999", nil)
-	w := httptest.NewRecorder()
-
-	app.postByIDHandler(w, req)
+	w := performRequest(app.engine, http.MethodGet, "/api/posts/9999")
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("ожидалось %d, получено %d", http.StatusNotFound, w.Code)
@@ -445,7 +603,7 @@ func TestGetPostByIDHandlerNotFound(t *testing.T) {
 
 	var errorResp ErrorResponse
 	if err := json.NewDecoder(w.Body).Decode(&errorResp); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	if errorResp.Message != "Пост не найден" {
@@ -456,24 +614,15 @@ func TestGetPostByIDHandlerNotFound(t *testing.T) {
 // --- Тесты обновления поста ---
 
 func TestUpdatePostHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
 
-	// Создаём тестовый пост
-	store := app.GetStore()
-	store.Create(Post{
+	postRepo := app.postRepo.(*MockPostRepository)
+	id := postRepo.Create(Post{
 		Title:   "Оригинальный заголовок",
 		Content: "Оригинальное содержание",
 		Author:  &Author{ID: 1, Username: "тест", Email: "test@test.com"},
 	})
-	// Получаем ID созданного поста
-	allPosts, _ := store.GetAll(1, 100)
-	var testPostID int64
-	for _, p := range allPosts {
-		if p.Title == "Оригинальный заголовок" {
-			testPostID = p.ID
-			break
-		}
-	}
 
 	updateReq := UpdatePostRequest{
 		Title:    "Обновлённый заголовок",
@@ -482,11 +631,7 @@ func TestUpdatePostHandler(t *testing.T) {
 	}
 
 	jsonBody, _ := json.Marshal(updateReq)
-	req := httptest.NewRequest(http.MethodPut, "/api/posts/"+formatID(testPostID), bytes.NewBuffer(jsonBody))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	app.postByIDHandler(w, req)
+	w := performRequestWithBody(app.engine, http.MethodPut, "/api/posts/"+formatID(id), jsonBody)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("ожидалось %d, получено %d", http.StatusOK, w.Code)
@@ -494,7 +639,7 @@ func TestUpdatePostHandler(t *testing.T) {
 
 	var response PostResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	if response.Post.Title != "Обновлённый заголовок" {
@@ -506,14 +651,11 @@ func TestUpdatePostHandler(t *testing.T) {
 }
 
 func TestUpdatePostHandlerNotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
 
 	jsonBody, _ := json.Marshal(UpdatePostRequest{Title: "Обновлённый"})
-	req := httptest.NewRequest(http.MethodPut, "/api/posts/9999", bytes.NewBuffer(jsonBody))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	app.postByIDHandler(w, req)
+	w := performRequestWithBody(app.engine, http.MethodPut, "/api/posts/9999", jsonBody)
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("ожидалось %d, получено %d", http.StatusNotFound, w.Code)
@@ -523,36 +665,32 @@ func TestUpdatePostHandlerNotFound(t *testing.T) {
 // --- Тесты удаления поста ---
 
 func TestDeletePostHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
 
-	store := app.GetStore()
-	id := store.Create(Post{
+	postRepo := app.postRepo.(*MockPostRepository)
+	id := postRepo.Create(Post{
 		Title:   "На удаление",
 		Content: "Будет удалён",
 		Author:  &Author{ID: 1, Username: "тест", Email: "test@test.com"},
 	})
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/posts/"+formatID(id), nil)
-	w := httptest.NewRecorder()
-
-	app.postByIDHandler(w, req)
+	w := performRequest(app.engine, http.MethodDelete, "/api/posts/"+formatID(id))
 
 	if w.Code != http.StatusNoContent {
 		t.Errorf("ожидалось %d, получено %d", http.StatusNoContent, w.Code)
 	}
 
-	_, exists := store.GetByID(id)
+	_, exists := postRepo.GetByID(id)
 	if exists {
 		t.Error("ожидалось, что пост будет удалён")
 	}
 }
 
 func TestDeletePostHandlerNotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
-	req := httptest.NewRequest(http.MethodDelete, "/api/posts/9999", nil)
-	w := httptest.NewRecorder()
-
-	app.postByIDHandler(w, req)
+	w := performRequest(app.engine, http.MethodDelete, "/api/posts/9999")
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("ожидалось %d, получено %d", http.StatusNotFound, w.Code)
@@ -560,32 +698,19 @@ func TestDeletePostHandlerNotFound(t *testing.T) {
 }
 
 func TestPostByIDHandlerInvalidID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
-	req := httptest.NewRequest(http.MethodGet, "/api/posts/invalid", nil)
-	w := httptest.NewRecorder()
-
-	app.postByIDHandler(w, req)
+	w := performRequest(app.engine, http.MethodGet, "/api/posts/invalid")
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("ожидалось %d, получено %d", http.StatusBadRequest, w.Code)
 	}
 }
 
-func TestPostsHandlerMethodNotAllowed(t *testing.T) {
-	app := newTestApp()
-	req := httptest.NewRequest(http.MethodPatch, "/api/posts", nil)
-	w := httptest.NewRecorder()
-
-	app.postsHandler(w, req)
-
-	if w.Code != http.StatusMethodNotAllowed {
-		t.Errorf("ожидалось %d, получено %d", http.StatusMethodNotAllowed, w.Code)
-	}
-}
-
 // --- Тесты формата ответа поста ---
 
 func TestPostComplexJSONStructure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
 
 	createReq := CreatePostRequest{
@@ -595,15 +720,11 @@ func TestPostComplexJSONStructure(t *testing.T) {
 	}
 
 	jsonBody, _ := json.Marshal(createReq)
-	req := httptest.NewRequest(http.MethodPost, "/api/posts", bytes.NewBuffer(jsonBody))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	app.postsHandler(w, req)
+	w := performRequestWithBody(app.engine, http.MethodPost, "/api/posts", jsonBody)
 
 	var rawJSON map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	for _, field := range []string{"post", "message", "timestamp"} {
@@ -633,15 +754,13 @@ func TestPostComplexJSONStructure(t *testing.T) {
 }
 
 func TestGetPostsResponseJSONFormat(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
-	req := httptest.NewRequest(http.MethodGet, "/api/posts", nil)
-	w := httptest.NewRecorder()
-
-	app.postsHandler(w, req)
+	w := performRequest(app.engine, http.MethodGet, "/api/posts")
 
 	var rawJSON map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	for _, field := range []string{"posts", "total", "page", "per_page", "timestamp"} {
@@ -652,18 +771,15 @@ func TestGetPostsResponseJSONFormat(t *testing.T) {
 }
 
 func TestCreatePostResponseJSONFormat(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
 
 	jsonBody, _ := json.Marshal(CreatePostRequest{Title: "Тест формата", Content: "Содержание"})
-	req := httptest.NewRequest(http.MethodPost, "/api/posts", bytes.NewBuffer(jsonBody))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	app.postsHandler(w, req)
+	w := performRequestWithBody(app.engine, http.MethodPost, "/api/posts", jsonBody)
 
 	var rawJSON map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	for _, field := range []string{"post", "message", "timestamp"} {
@@ -674,15 +790,13 @@ func TestCreatePostResponseJSONFormat(t *testing.T) {
 }
 
 func TestPostResponseJSONFormat(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
-	req := httptest.NewRequest(http.MethodGet, "/api/posts/1", nil)
-	w := httptest.NewRecorder()
-
-	app.postByIDHandler(w, req)
+	w := performRequest(app.engine, http.MethodGet, "/api/posts/1")
 
 	var rawJSON map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	for _, field := range []string{"post", "timestamp"} {
@@ -693,15 +807,13 @@ func TestPostResponseJSONFormat(t *testing.T) {
 }
 
 func TestErrorResponseJSONFormat(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
-	req := httptest.NewRequest(http.MethodGet, "/api/posts/99999", nil)
-	w := httptest.NewRecorder()
-
-	app.postByIDHandler(w, req)
+	w := performRequest(app.engine, http.MethodGet, "/api/posts/99999")
 
 	var rawJSON map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&rawJSON); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	for _, field := range []string{"error", "message", "timestamp"} {
@@ -712,15 +824,13 @@ func TestErrorResponseJSONFormat(t *testing.T) {
 }
 
 func TestAuthorNestedStructure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
-	req := httptest.NewRequest(http.MethodGet, "/api/posts/1", nil)
-	w := httptest.NewRecorder()
-
-	app.postByIDHandler(w, req)
+	w := performRequest(app.engine, http.MethodGet, "/api/posts/1")
 
 	var response PostResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	if response.Post.Author == nil {
@@ -735,6 +845,7 @@ func TestAuthorNestedStructure(t *testing.T) {
 }
 
 func TestTagsArrayStructure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
 
 	jsonBody, _ := json.Marshal(CreatePostRequest{
@@ -742,15 +853,11 @@ func TestTagsArrayStructure(t *testing.T) {
 		Content:  "Содержание",
 		TagNames: []string{"Go", "API", "Тестирование"},
 	})
-	req := httptest.NewRequest(http.MethodPost, "/api/posts", bytes.NewBuffer(jsonBody))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	app.postsHandler(w, req)
+	w := performRequestWithBody(app.engine, http.MethodPost, "/api/posts", jsonBody)
 
 	var response CreatePostResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	if len(response.Post.Tags) != 3 {
@@ -768,27 +875,24 @@ func TestTagsArrayStructure(t *testing.T) {
 }
 
 func TestViewCountIncrement(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
 
 	// Первый запрос
-	req1 := httptest.NewRequest(http.MethodGet, "/api/posts/1", nil)
-	w1 := httptest.NewRecorder()
-	app.postByIDHandler(w1, req1)
+	w1 := performRequest(app.engine, http.MethodGet, "/api/posts/1")
 
 	var resp1 PostResponse
 	if err := json.NewDecoder(w1.Body).Decode(&resp1); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 	firstCount := resp1.Post.ViewCount
 
 	// Второй запрос
-	req2 := httptest.NewRequest(http.MethodGet, "/api/posts/1", nil)
-	w2 := httptest.NewRecorder()
-	app.postByIDHandler(w2, req2)
+	w2 := performRequest(app.engine, http.MethodGet, "/api/posts/1")
 
 	var resp2 PostResponse
 	if err := json.NewDecoder(w2.Body).Decode(&resp2); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	if resp2.Post.ViewCount != firstCount+1 {
@@ -797,10 +901,11 @@ func TestViewCountIncrement(t *testing.T) {
 }
 
 func TestUpdatePostPartialUpdate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
 
-	store := app.GetStore()
-	id := store.Create(Post{
+	postRepo := app.postRepo.(*MockPostRepository)
+	id := postRepo.Create(Post{
 		Title:   "Оригинал",
 		Content: "Оригинальное содержание",
 		Excerpt: "Оригинальное описание",
@@ -810,11 +915,7 @@ func TestUpdatePostPartialUpdate(t *testing.T) {
 	// Обновляем только заголовок
 	updateReq := UpdatePostRequest{Title: "Обновлённый заголовок"}
 	jsonBody, _ := json.Marshal(updateReq)
-	req := httptest.NewRequest(http.MethodPut, "/api/posts/"+formatID(id), bytes.NewBuffer(jsonBody))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	app.postByIDHandler(w, req)
+	w := performRequestWithBody(app.engine, http.MethodPut, "/api/posts/"+formatID(id), jsonBody)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("ожидалось %d, получено %d", http.StatusOK, w.Code)
@@ -822,7 +923,7 @@ func TestUpdatePostPartialUpdate(t *testing.T) {
 
 	var response PostResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	if response.Post.Title != "Обновлённый заголовок" {
@@ -837,6 +938,7 @@ func TestUpdatePostPartialUpdate(t *testing.T) {
 // --- Тесты создания поста с указанием автора ---
 
 func TestCreatePostWithAuthorID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
 
 	// Создаём пост с указанием ID автора
@@ -845,11 +947,7 @@ func TestCreatePostWithAuthorID(t *testing.T) {
 		Content:  "Содержание",
 		AuthorID: 1,
 	})
-	req := httptest.NewRequest(http.MethodPost, "/api/posts", bytes.NewBuffer(jsonBody))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	app.postsHandler(w, req)
+	w := performRequestWithBody(app.engine, http.MethodPost, "/api/posts", jsonBody)
 
 	if w.Code != http.StatusCreated {
 		t.Errorf("ожидалось %d, получено %d", http.StatusCreated, w.Code)
@@ -857,7 +955,7 @@ func TestCreatePostWithAuthorID(t *testing.T) {
 
 	var response CreatePostResponse
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	if response.Post.Author == nil {
@@ -872,6 +970,7 @@ func TestCreatePostWithAuthorID(t *testing.T) {
 }
 
 func TestCreatePostWithUnknownAuthor(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
 
 	// Создаём пост с несуществующим ID автора
@@ -880,11 +979,7 @@ func TestCreatePostWithUnknownAuthor(t *testing.T) {
 		Content:  "Содержание",
 		AuthorID: 999,
 	})
-	req := httptest.NewRequest(http.MethodPost, "/api/posts", bytes.NewBuffer(jsonBody))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	app.postsHandler(w, req)
+	w := performRequestWithBody(app.engine, http.MethodPost, "/api/posts", jsonBody)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("ожидалось %d, получено %d", http.StatusBadRequest, w.Code)
@@ -892,7 +987,7 @@ func TestCreatePostWithUnknownAuthor(t *testing.T) {
 
 	var errorResp ErrorResponse
 	if err := json.NewDecoder(w.Body).Decode(&errorResp); err != nil {
-		t.Fatalf("Ошибка декоодирования JSON: %v", err)
+		t.Fatalf("Ошибка декодирования JSON: %v", err)
 	}
 
 	if errorResp.Message == "" {
@@ -903,9 +998,9 @@ func TestCreatePostWithUnknownAuthor(t *testing.T) {
 // --- Интеграционный тест ---
 
 func TestIntegrationAllEndpoints(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	app := newTestApp()
-	mux := app.SetupHTTP()
-	server := httptest.NewServer(mux)
+	server := httptest.NewServer(app.engine)
 	defer server.Close()
 
 	// Здоровье
@@ -948,6 +1043,68 @@ func TestIntegrationAllEndpoints(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("посты: ожидалось 200, получено %d", resp.StatusCode)
+	}
+}
+
+// --- Тесты DI и интерфейсов ---
+
+func TestNewAppWithMockRepos(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authorRepo := NewMockAuthorRepository()
+	postRepo := NewMockPostRepository()
+	counter := NewRequestCounter()
+
+	app := NewApp(AppOptions{
+		AuthorRepo: authorRepo,
+		PostRepo:   postRepo,
+		Counter:    counter,
+	})
+
+	if app == nil {
+		t.Fatal("NewApp вернул nil")
+	}
+	if app.postRepo == nil {
+		t.Error("postRepo не установлен")
+	}
+	if app.authorRepo == nil {
+		t.Error("authorRepo не установлен")
+	}
+	if app.counter == nil {
+		t.Error("counter не установлен")
+	}
+}
+
+func TestPostRepositoryInterface(t *testing.T) {
+	var repo PostRepository = NewMockPostRepository()
+
+	id := repo.Create(Post{Title: "Тест", Content: "Содержание", Author: &Author{ID: 1, Username: "тест", Email: "t@t.com"}})
+	if id != 1 {
+		t.Errorf("ожидался ID 1, получено %d", id)
+	}
+
+	post, found := repo.GetByID(id)
+	if !found {
+		t.Fatal("Пост не найден")
+	}
+	if post.Title != "Тест" {
+		t.Errorf("ожидался заголовок 'Тест', получено '%s'", post.Title)
+	}
+}
+
+func TestAuthorRepositoryInterface(t *testing.T) {
+	var repo AuthorRepository = NewMockAuthorRepository()
+
+	author, found := repo.GetByID(1)
+	if !found {
+		t.Fatal("Автор не найден")
+	}
+	if author.Username != "john_blogger" {
+		t.Errorf("ожидался Username 'john_blogger', получено '%s'", author.Username)
+	}
+
+	_, found = repo.GetByID(999)
+	if found {
+		t.Error("ожидалось false для несуществующего автора")
 	}
 }
 

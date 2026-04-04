@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -15,6 +14,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 // --- Константы ---
@@ -102,18 +103,18 @@ type Comment struct {
 
 // Post — пост в блоге
 type Post struct {
-	ID          int64      `json:"id"`
-	Title       string     `json:"title"`
-	Slug        string     `json:"slug"`
-	Content     string     `json:"content"`
-	Excerpt     string     `json:"excerpt,omitempty"`
-	Author      *Author    `json:"author"`
-	Tags        []Tag      `json:"tags,omitempty"`
-	Comments    []Comment  `json:"comments,omitempty"`
-	ViewCount   int64      `json:"view_count"`
-	PublishedAt time.Time  `json:"published_at,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at,omitempty"`
+	ID          int64     `json:"id"`
+	Title       string    `json:"title"`
+	Slug        string    `json:"slug"`
+	Content     string    `json:"content"`
+	Excerpt     string    `json:"excerpt,omitempty"`
+	Author      *Author   `json:"author"`
+	Tags        []Tag     `json:"tags,omitempty"`
+	Comments    []Comment `json:"comments,omitempty"`
+	ViewCount   int64     `json:"view_count"`
+	PublishedAt time.Time `json:"published_at,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at,omitempty"`
 }
 
 // CreatePostRequest — запрос на создание поста
@@ -162,9 +163,26 @@ type ErrorResponse struct {
 	Timestamp string `json:"timestamp"`
 }
 
+// --- Интерфейсы репозиториев (DIP + ISP) ---
+
+// AuthorRepository — контракт хранилища авторов
+type AuthorRepository interface {
+	GetByID(id int64) (*Author, bool)
+}
+
+// PostRepository — контракт хранилища постов
+type PostRepository interface {
+	GetAll(page, perPage int) ([]Post, int)
+	GetByID(id int64) (Post, bool)
+	Create(post Post) int64
+	Update(id int64, req UpdatePostRequest) (Post, bool)
+	Delete(id int64) bool
+	IncrementViewCount(id int64) (Post, bool)
+}
+
 // --- Справочник авторов ---
 
-// AuthorStore — хранилище авторов (справочник)
+// AuthorStore — хранилище авторов (справочник), реализует AuthorRepository
 type AuthorStore struct {
 	authors map[int64]*Author
 }
@@ -193,7 +211,7 @@ func (s *AuthorStore) GetByID(id int64) (*Author, bool) {
 
 // --- Хранилище постов ---
 
-// PostStore — потокобезопасное хранилище постов
+// PostStore — потокобезопасное хранилище постов, реализует PostRepository
 type PostStore struct {
 	mu     sync.RWMutex
 	posts  map[int64]Post
@@ -307,9 +325,9 @@ func (s *PostStore) IncrementViewCount(id int64) (Post, bool) {
 }
 
 // InitSamplePosts заполняет хранилище демонстрационными данными
-func (s *PostStore) InitSamplePosts(authorStore *AuthorStore) {
+func (s *PostStore) InitSamplePosts(authorRepo AuthorRepository) {
 	now := time.Now()
-	author, _ := authorStore.GetByID(1)
+	author, _ := authorRepo.GetByID(1)
 
 	samples := []Post{
 		{
@@ -372,22 +390,6 @@ func makeTagsFromNames(names []string) []Tag {
 	return tags
 }
 
-// writeJSON записывает ответ в формате JSON с указанным кодом состояния
-func writeJSON(w http.ResponseWriter, statusCode int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(data)
-}
-
-// writeError записывает ошибку в формате JSON
-func writeError(w http.ResponseWriter, statusCode int, message string) {
-	writeJSON(w, statusCode, ErrorResponse{
-		Error:     http.StatusText(statusCode),
-		Message:   message,
-		Timestamp: time.Now().Format(time.RFC3339),
-	})
-}
-
 // --- RequestCounter — потокобезопасный счётчик запросов ---
 
 // RequestCounter хранит счётчик запросов и время запуска сервера
@@ -424,39 +426,31 @@ func (rc *RequestCounter) Get() Stats {
 
 // --- App — приложение с внедрением зависимостей ---
 
-// App содержит все зависимости приложения
+// App содержит зависимости, маршрутизатор и сервер
 type App struct {
-	authorStore *AuthorStore
-	store       *PostStore
-	counter     *RequestCounter
-	server      *http.Server
-	running     atomic.Bool
+	authorRepo AuthorRepository
+	postRepo   PostRepository
+	counter    *RequestCounter
+	engine     *gin.Engine
+	server     *http.Server
+	running    atomic.Bool
 }
 
-// NewApp создаёт новое приложение с инициализированными зависимостями
-func NewApp() *App {
+// AppOptions — параметры для создания приложения (DI)
+type AppOptions struct {
+	AuthorRepo AuthorRepository
+	PostRepo   PostRepository
+	Counter    *RequestCounter
+}
+
+// NewApp создаёт приложение с инъекцией зависимостей
+func NewApp(opts AppOptions) *App {
 	app := &App{
-		authorStore: NewAuthorStore(),
-		store:       NewPostStore(),
-		counter:     NewRequestCounter(),
+		authorRepo: opts.AuthorRepo,
+		postRepo:   opts.PostRepo,
+		counter:    opts.Counter,
 	}
-	app.store.InitSamplePosts(app.authorStore)
 	return app
-}
-
-// GetStore возвращает хранилище постов (для тестов)
-func (a *App) GetStore() *PostStore {
-	return a.store
-}
-
-// GetCounter возвращает счётчик запросов (для тестов)
-func (a *App) GetCounter() *RequestCounter {
-	return a.counter
-}
-
-// GetServer возвращает HTTP-сервер (для тестов)
-func (a *App) GetServer() *http.Server {
-	return a.server
 }
 
 // IsRunning проверяет, запущен ли сервер
@@ -464,24 +458,44 @@ func (a *App) IsRunning() bool {
 	return a.running.Load()
 }
 
-// SetupHTTP регистрирует все обработчики HTTP-запросов
-func (a *App) SetupHTTP() *http.ServeMux {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", a.healthHandler)
-	mux.HandleFunc("/api/stats", a.statsHandler)
-	mux.HandleFunc("/api/echo", a.echoHandler)
-	mux.HandleFunc("/api/posts", a.postsHandler)
-	mux.HandleFunc("/api/posts/", a.postByIDHandler)
-	return mux
+// SetupHTTP регистрирует все обработчики HTTP-запросов через Gin
+func (a *App) SetupHTTP() *gin.Engine {
+	gin.SetMode(gin.ReleaseMode)
+	engine := gin.New()
+	engine.Use(gin.Recovery())
+
+	a.engine = engine
+
+	// Middleware для подсчёта запросов
+	engine.Use(func(c *gin.Context) {
+		a.counter.Increment()
+		c.Next()
+	})
+
+	// Health check
+	engine.GET("/health", a.healthHandler)
+
+	// API routes
+	engine.GET("/api/stats", a.statsHandler)
+	engine.POST("/api/echo", a.echoHandler)
+
+	// Posts routes
+	engine.GET("/api/posts", a.getPostsHandler)
+	engine.POST("/api/posts", a.createPostHandler)
+	engine.GET("/api/posts/:id", a.getPostByIDHandler)
+	engine.PUT("/api/posts/:id", a.updatePostHandler)
+	engine.DELETE("/api/posts/:id", a.deletePostHandler)
+
+	return engine
 }
 
 // Start запускает HTTP-сервер с graceful-завершением
 func (a *App) Start(port string) error {
-	mux := a.SetupHTTP()
+	a.SetupHTTP()
 
 	a.server = &http.Server{
 		Addr:         port,
-		Handler:      mux,
+		Handler:      a.engine,
 		ReadTimeout:  httpReadTimeout,
 		WriteTimeout: httpWriteTimeout,
 		IdleTimeout:  httpIdleTimeout,
@@ -513,18 +527,11 @@ func (a *App) Start(port string) error {
 	return nil
 }
 
-// --- Обработчики HTTP ---
+// --- Обработчики HTTP (Gin) ---
 
 // healthHandler — эндпоинт проверки здоровья сервиса
-func (a *App) healthHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Метод не поддерживается", http.StatusMethodNotAllowed)
-		return
-	}
-
-	a.counter.Increment()
-
-	writeJSON(w, http.StatusOK, HealthResponse{
+func (a *App) healthHandler(c *gin.Context) {
+	c.JSON(http.StatusOK, HealthResponse{
 		Status:    "работает",
 		Timestamp: time.Now().Format(time.RFC3339),
 		Version:   apiVersion,
@@ -532,57 +539,33 @@ func (a *App) healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // statsHandler — эндпоинт статистики запросов
-func (a *App) statsHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Метод не поддерживается", http.StatusMethodNotAllowed)
-		return
-	}
-
-	a.counter.Increment()
-	writeJSON(w, http.StatusOK, a.counter.Get())
+func (a *App) statsHandler(c *gin.Context) {
+	c.JSON(http.StatusOK, a.counter.Get())
 }
 
 // echoHandler — эндпоинт «эхо» (возвращает полученное сообщение)
-func (a *App) echoHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Метод не поддерживается", http.StatusMethodNotAllowed)
-		return
-	}
-
-	a.counter.Increment()
-
+func (a *App) echoHandler(c *gin.Context) {
 	var req EchoRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "Некорректный JSON")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:     http.StatusText(http.StatusBadRequest),
+			Message:   "Некорректный JSON",
+			Timestamp: time.Now().Format(time.RFC3339),
+		})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, EchoResponse{
+	c.JSON(http.StatusOK, EchoResponse{
 		Original:  req,
 		Processed: fmt.Sprintf("Получено: %s (обработано REST API)", req.Message),
 		Timestamp: time.Now().Format(time.RFC3339),
 	})
 }
 
-// postsHandler — маршрутизатор эндпоинта /api/posts (список и создание)
-func (a *App) postsHandler(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		a.getPostsHandler(w, r)
-	case http.MethodPost:
-		a.createPostHandler(w, r)
-	default:
-		writeError(w, http.StatusMethodNotAllowed, "Метод не поддерживается")
-	}
-}
-
 // getPostsHandler — получение списка постов с пагинацией
-func (a *App) getPostsHandler(w http.ResponseWriter, r *http.Request) {
-	a.counter.Increment()
-
-	query := r.URL.Query()
-	page, _ := strconv.Atoi(query.Get("page"))
-	perPage, _ := strconv.Atoi(query.Get("per_page"))
+func (a *App) getPostsHandler(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "10"))
 
 	if page < defaultPage {
 		page = defaultPage
@@ -591,9 +574,9 @@ func (a *App) getPostsHandler(w http.ResponseWriter, r *http.Request) {
 		perPage = defaultPerPage
 	}
 
-	paginatedPosts, total := a.store.GetAll(page, perPage)
+	paginatedPosts, total := a.postRepo.GetAll(page, perPage)
 
-	writeJSON(w, http.StatusOK, GetPostsResponse{
+	c.JSON(http.StatusOK, GetPostsResponse{
 		Posts:     paginatedPosts,
 		Total:     total,
 		Page:      page,
@@ -603,17 +586,23 @@ func (a *App) getPostsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // createPostHandler — создание нового поста
-func (a *App) createPostHandler(w http.ResponseWriter, r *http.Request) {
-	a.counter.Increment()
-
+func (a *App) createPostHandler(c *gin.Context) {
 	var req CreatePostRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "Некорректный JSON")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:     http.StatusText(http.StatusBadRequest),
+			Message:   "Некорректный JSON",
+			Timestamp: time.Now().Format(time.RFC3339),
+		})
 		return
 	}
 
 	if req.Title == "" || req.Content == "" {
-		writeError(w, http.StatusBadRequest, "Заголовок и содержание обязательны")
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:     http.StatusText(http.StatusBadRequest),
+			Message:   "Заголовок и содержание обязательны",
+			Timestamp: time.Now().Format(time.RFC3339),
+		})
 		return
 	}
 
@@ -623,9 +612,13 @@ func (a *App) createPostHandler(w http.ResponseWriter, r *http.Request) {
 		authorID = defaultAuthorID
 	}
 
-	author, found := a.authorStore.GetByID(authorID)
+	author, found := a.authorRepo.GetByID(authorID)
 	if !found {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("Автор с ID %d не найден", authorID))
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:     http.StatusText(http.StatusBadRequest),
+			Message:   fmt.Sprintf("Автор с ID %d не найден", authorID),
+			Timestamp: time.Now().Format(time.RFC3339),
+		})
 		return
 	}
 
@@ -642,94 +635,126 @@ func (a *App) createPostHandler(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: now,
 	}
 
-	id := a.store.Create(post)
+	id := a.postRepo.Create(post)
 	post.ID = id
 
-	writeJSON(w, http.StatusCreated, CreatePostResponse{
+	c.JSON(http.StatusCreated, CreatePostResponse{
 		Post:      post,
 		Message:   "Пост успешно создан",
 		Timestamp: time.Now().Format(time.RFC3339),
 	})
 }
 
-// postByIDHandler — маршрутизатор эндпоинта /api/posts/{id}
-func (a *App) postByIDHandler(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/api/posts/")
-	id, err := strconv.ParseInt(path, 10, 64)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "Некорректный ID поста")
-		return
-	}
-
-	switch r.Method {
-	case http.MethodGet:
-		a.getPostByIDHandler(w, r, id)
-	case http.MethodPut:
-		a.updatePostHandler(w, r, id)
-	case http.MethodDelete:
-		a.deletePostHandler(w, r, id)
-	default:
-		writeError(w, http.StatusMethodNotAllowed, "Метод не поддерживается")
-	}
-}
-
 // getPostByIDHandler — получение одного поста по ID
-func (a *App) getPostByIDHandler(w http.ResponseWriter, r *http.Request, id int64) {
-	a.counter.Increment()
-
-	post, found := a.store.IncrementViewCount(id)
-	if !found {
-		writeError(w, http.StatusNotFound, "Пост не найден")
+func (a *App) getPostByIDHandler(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:     http.StatusText(http.StatusBadRequest),
+			Message:   "Некорректный ID поста",
+			Timestamp: time.Now().Format(time.RFC3339),
+		})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, PostResponse{
+	post, found := a.postRepo.IncrementViewCount(id)
+	if !found {
+		c.JSON(http.StatusNotFound, ErrorResponse{
+			Error:     http.StatusText(http.StatusNotFound),
+			Message:   "Пост не найден",
+			Timestamp: time.Now().Format(time.RFC3339),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, PostResponse{
 		Post:      post,
 		Timestamp: time.Now().Format(time.RFC3339),
 	})
 }
 
 // updatePostHandler — обновление поста по ID
-func (a *App) updatePostHandler(w http.ResponseWriter, r *http.Request, id int64) {
-	a.counter.Increment()
+func (a *App) updatePostHandler(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:     http.StatusText(http.StatusBadRequest),
+			Message:   "Некорректный ID поста",
+			Timestamp: time.Now().Format(time.RFC3339),
+		})
+		return
+	}
 
-	if _, exists := a.store.GetByID(id); !exists {
-		writeError(w, http.StatusNotFound, "Пост не найден")
+	if _, exists := a.postRepo.GetByID(id); !exists {
+		c.JSON(http.StatusNotFound, ErrorResponse{
+			Error:     http.StatusText(http.StatusNotFound),
+			Message:   "Пост не найден",
+			Timestamp: time.Now().Format(time.RFC3339),
+		})
 		return
 	}
 
 	var req UpdatePostRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "Некорректный JSON")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:     http.StatusText(http.StatusBadRequest),
+			Message:   "Некорректный JSON",
+			Timestamp: time.Now().Format(time.RFC3339),
+		})
 		return
 	}
 
-	updatedPost, ok := a.store.Update(id, req)
+	updatedPost, ok := a.postRepo.Update(id, req)
 	if !ok {
-		writeError(w, http.StatusNotFound, "Пост не найден")
+		c.JSON(http.StatusNotFound, ErrorResponse{
+			Error:     http.StatusText(http.StatusNotFound),
+			Message:   "Пост не найден",
+			Timestamp: time.Now().Format(time.RFC3339),
+		})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, PostResponse{
+	c.JSON(http.StatusOK, PostResponse{
 		Post:      updatedPost,
 		Timestamp: time.Now().Format(time.RFC3339),
 	})
 }
 
 // deletePostHandler — удаление поста по ID
-func (a *App) deletePostHandler(w http.ResponseWriter, r *http.Request, id int64) {
-	a.counter.Increment()
-
-	if !a.store.Delete(id) {
-		writeError(w, http.StatusNotFound, "Пост не найден")
+func (a *App) deletePostHandler(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:     http.StatusText(http.StatusBadRequest),
+			Message:   "Некорректный ID поста",
+			Timestamp: time.Now().Format(time.RFC3339),
+		})
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusNoContent)
+	if !a.postRepo.Delete(id) {
+		c.JSON(http.StatusNotFound, ErrorResponse{
+			Error:     http.StatusText(http.StatusNotFound),
+			Message:   "Пост не найден",
+			Timestamp: time.Now().Format(time.RFC3339),
+		})
+		return
+	}
+
+	c.Status(http.StatusNoContent)
 }
 
 func main() {
-	app := NewApp()
+	// Создание и инъекция зависимостей (Dependency Injection)
+	authorRepo := NewAuthorStore()
+	postRepo := NewPostStore()
+	postRepo.InitSamplePosts(authorRepo)
+	counter := NewRequestCounter()
+
+	app := NewApp(AppOptions{
+		AuthorRepo: authorRepo,
+		PostRepo:   postRepo,
+		Counter:    counter,
+	})
 	app.Start(defaultPort)
 }
