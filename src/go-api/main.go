@@ -8,12 +8,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
+
+// --- Модели данных ---
 
 // Stats хранит статистику запросов
 type Stats struct {
@@ -87,90 +91,334 @@ type Post struct {
 
 // CreatePostRequest запрос на создание поста
 type CreatePostRequest struct {
-	Title   string   `json:"title"`
-	Content string   `json:"content"`
-	Excerpt string   `json:"excerpt,omitempty"`
+	Title    string   `json:"title"`
+	Content  string   `json:"content"`
+	Excerpt  string   `json:"excerpt,omitempty"`
+	TagNames []string `json:"tag_names,omitempty"`
+}
+
+// UpdatePostRequest запрос на обновление поста
+type UpdatePostRequest struct {
+	Title    string   `json:"title,omitempty"`
+	Content  string   `json:"content,omitempty"`
+	Excerpt  string   `json:"excerpt,omitempty"`
 	TagNames []string `json:"tag_names,omitempty"`
 }
 
 // CreatePostResponse ответ на создание поста
 type CreatePostResponse struct {
-	Post      Post     `json:"post"`
-	Message   string   `json:"message"`
-	Timestamp string   `json:"timestamp"`
+	Post      Post   `json:"post"`
+	Message   string `json:"message"`
+	Timestamp string `json:"timestamp"`
 }
 
 // GetPostsResponse ответ на получение списка постов
 type GetPostsResponse struct {
-	Posts      []Post   `json:"posts"`
-	Total      int      `json:"total"`
-	Page       int      `json:"page"`
-	PerPage    int      `json:"per_page"`
-	Timestamp  string   `json:"timestamp"`
+	Posts     []Post `json:"posts"`
+	Total     int    `json:"total"`
+	Page      int    `json:"page"`
+	PerPage   int    `json:"per_page"`
+	Timestamp string `json:"timestamp"`
 }
 
 // PostResponse ответ на получение одного поста
 type PostResponse struct {
-	Post      Post     `json:"post"`
-	Timestamp string   `json:"timestamp"`
+	Post      Post   `json:"post"`
+	Timestamp string `json:"timestamp"`
 }
 
 // ErrorResponse структура ошибки
 type ErrorResponse struct {
-	Error     string   `json:"error"`
-	Message   string   `json:"message"`
-	Timestamp string   `json:"timestamp"`
+	Error     string `json:"error"`
+	Message   string `json:"message"`
+	Timestamp string `json:"timestamp"`
 }
 
-var (
-	stats     = Stats{RequestCount: 0}
-	statsMu   sync.RWMutex
-	startTime time.Time
+// --- Хранилище постов ---
 
-	// Хранилище постов (in-memory)
-	posts   = make(map[int64]Post)
-	postsMu sync.RWMutex
-	nextID  int64 = 1
+// PostStore — потокобезопасное хранилище постов
+type PostStore struct {
+	mu     sync.RWMutex
+	posts  map[int64]Post
+	nextID int64
+}
 
-	// HTTP сервер для graceful shutdown
-	server *http.Server
+// NewPostStore создаёт новое хранилище
+func NewPostStore() *PostStore {
+	return &PostStore{
+		posts:  make(map[int64]Post),
+		nextID: 1,
+	}
+}
 
-	// Флаг завершения работы
-	shutdownInProgress int32
+// GetAll возвращает все посты с пагинацией, отсортированные по ID (новые первыми)
+func (s *PostStore) GetAll(page, perPage int) ([]Post, int) {
+	s.mu.RLock()
+	allPosts := make([]Post, 0, len(s.posts))
+	for _, post := range s.posts {
+		allPosts = append(allPosts, post)
+	}
+	s.mu.RUnlock()
 
-	// Примеры данных для демонстрации
-	defaultAuthor = &Author{
+	// Сортировка по ID (новые первыми)
+	sort.Slice(allPosts, func(i, j int) bool {
+		return allPosts[i].ID > allPosts[j].ID
+	})
+
+	total := len(allPosts)
+	start := (page - 1) * perPage
+	end := start + perPage
+
+	if start >= total {
+		return []Post{}, total
+	}
+	if end > total {
+		end = total
+	}
+
+	return allPosts[start:end], total
+}
+
+// GetByID возвращает пост по ID
+func (s *PostStore) GetByID(id int64) (Post, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	post, exists := s.posts[id]
+	return post, exists
+}
+
+// Create добавляет новый пост и возвращает его ID
+func (s *PostStore) Create(post Post) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id := s.nextID
+	post.ID = id
+	s.nextID++
+	s.posts[id] = post
+	return id
+}
+
+// Update обновляет пост по ID
+func (s *PostStore) Update(id int64, update UpdatePostRequest) (Post, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	post, exists := s.posts[id]
+	if !exists {
+		return Post{}, false
+	}
+	if update.Title != "" {
+		post.Title = update.Title
+		post.Slug = strings.ToLower(strings.ReplaceAll(update.Title, " ", "-"))
+	}
+	if update.Content != "" {
+		post.Content = update.Content
+	}
+	if update.Excerpt != "" {
+		post.Excerpt = update.Excerpt
+	}
+	if len(update.TagNames) > 0 {
+		post.Tags = makeTagsFromNames(update.TagNames)
+	}
+	post.UpdatedAt = time.Now()
+	s.posts[id] = post
+	return post, true
+}
+
+// Delete удаляет пост по ID
+func (s *PostStore) Delete(id int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, exists := s.posts[id]
+	if !exists {
+		return false
+	}
+	delete(s.posts, id)
+	return true
+}
+
+// IncrementViewCount увеличивает счётчик просмотров
+func (s *PostStore) IncrementViewCount(id int64) (Post, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	post, exists := s.posts[id]
+	if !exists {
+		return Post{}, false
+	}
+	post.ViewCount++
+	s.posts[id] = post
+	return post, true
+}
+
+// InitSamplePosts заполняет хранилище тестовыми данными
+func (s *PostStore) InitSamplePosts() {
+	now := time.Now()
+	defaultAuthor := &Author{
 		ID:        1,
 		Username:  "john_blogger",
 		Email:     "john@example.com",
 		Bio:       "Разработчик и технический писатель",
 		AvatarURL: "https://example.com/avatars/john.jpg",
 	}
-	defaultTags = []Tag{
-		{ID: 1, Name: "Go", Slug: "go"},
-		{ID: 2, Name: "Backend", Slug: "backend"},
-		{ID: 3, Name: "API", Slug: "api"},
+
+	samples := []Post{
+		{
+			Title:       "Введение в Go API",
+			Slug:        "introduction-to-go-api",
+			Content:     "Go (Golang) — это мощный язык программирования для создания высокопроизводительных API...",
+			Excerpt:     "Изучаем основы создания API на Go",
+			Author:      defaultAuthor,
+			Tags:        []Tag{{ID: 1, Name: "Go", Slug: "go"}, {ID: 2, Name: "Backend", Slug: "backend"}, {ID: 3, Name: "API", Slug: "api"}},
+			ViewCount:   150,
+			PublishedAt: now.Add(-24 * time.Hour),
+			CreatedAt:   now.Add(-48 * time.Hour),
+		},
+		{
+			Title:       "Работа с JSON в Go",
+			Slug:        "working-with-json-in-go",
+			Content:     "Обработка JSON — одна из самых частых задач при разработке веб-сервисов...",
+			Excerpt:     "Полное руководство по encoding/json",
+			Author:      defaultAuthor,
+			Tags:        []Tag{{ID: 1, Name: "Go", Slug: "go"}, {ID: 4, Name: "JSON", Slug: "json"}},
+			ViewCount:   89,
+			PublishedAt: now.Add(-12 * time.Hour),
+			CreatedAt:   now.Add(-24 * time.Hour),
+		},
+		{
+			Title:       "Микросервисы: лучшие практики",
+			Slug:        "microservices-best-practices",
+			Content:     "При проектировании микросервисной архитектуры важно следовать определённым принципам...",
+			Excerpt:     "Советы по построению микросервисов",
+			Author:      defaultAuthor,
+			Tags:        []Tag{{ID: 2, Name: "Backend", Slug: "backend"}, {ID: 5, Name: "Architecture", Slug: "architecture"}},
+			ViewCount:   234,
+			PublishedAt: now.Add(-6 * time.Hour),
+			CreatedAt:   now.Add(-12 * time.Hour),
+		},
 	}
-)
 
-func main() {
-	startTime = time.Now()
-	stats.StartTime = startTime.Format(time.RFC3339)
+	for _, post := range samples {
+		s.Create(post)
+	}
+}
 
-	// Инициализация тестовыми данными
-	initSamplePosts()
+// --- Утилиты ---
 
-	// Создаём mux для всех handlers
+func makeTagsFromNames(names []string) []Tag {
+	tags := make([]Tag, 0, len(names))
+	for i, name := range names {
+		tags = append(tags, Tag{
+			ID:   int64(i + 1),
+			Name: name,
+			Slug: strings.ToLower(strings.ReplaceAll(name, " ", "-")),
+		})
+	}
+	return tags
+}
+
+func writeJSON(w http.ResponseWriter, status int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(data)
+}
+
+func writeErrorResponse(w http.ResponseWriter, status int, message string) {
+	writeJSON(w, status, ErrorResponse{
+		Error:     http.StatusText(status),
+		Message:   message,
+		Timestamp: time.Now().Format(time.RFC3339),
+	})
+}
+
+// --- RequestCounter — потокобезопасный счётчик запросов ---
+
+// RequestCounter хранит счётчик запросов и время запуска
+type RequestCounter struct {
+	mu        sync.RWMutex
+	count     int64
+	startTime time.Time
+}
+
+// NewRequestCounter создаёт новый счётчик
+func NewRequestCounter() *RequestCounter {
+	return &RequestCounter{
+		startTime: time.Now(),
+	}
+}
+
+// Increment увеличивает счётчик
+func (rc *RequestCounter) Increment() {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	rc.count++
+}
+
+// Get возвращает текущую статистику
+func (rc *RequestCounter) Get() Stats {
+	rc.mu.RLock()
+	defer rc.mu.RUnlock()
+	return Stats{
+		RequestCount: rc.count,
+		Uptime:       time.Since(rc.startTime).String(),
+		StartTime:    rc.startTime.Format(time.RFC3339),
+	}
+}
+
+// --- App — приложение с инъекцией зависимостей ---
+
+// App содержит все зависимости приложения
+type App struct {
+	store   *PostStore
+	counter *RequestCounter
+	server  *http.Server
+	running atomic.Bool
+}
+
+// NewApp создаёт новое приложение
+func NewApp() *App {
+	app := &App{
+		store:   NewPostStore(),
+		counter: NewRequestCounter(),
+	}
+	app.store.InitSamplePosts()
+	return app
+}
+
+// GetStore возвращает хранилище (для тестов)
+func (a *App) GetStore() *PostStore {
+	return a.store
+}
+
+// GetCounter возвращает счётчик (для тестов)
+func (a *App) GetCounter() *RequestCounter {
+	return a.counter
+}
+
+// GetServer возвращает HTTP-сервер (для тестов)
+func (a *App) GetServer() *http.Server {
+	return a.server
+}
+
+// IsRunning проверяет, работает ли сервер
+func (a *App) IsRunning() bool {
+	return a.running.Load()
+}
+
+// SetupHTTP регистрирует все обработчики
+func (a *App) SetupHTTP() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", healthHandler)
-	mux.HandleFunc("/api/stats", statsHandler)
-	mux.HandleFunc("/api/echo", echoHandler)
-	mux.HandleFunc("/api/posts", postsHandler)
-	mux.HandleFunc("/api/posts/", postByIDHandler)
+	mux.HandleFunc("/health", a.healthHandler)
+	mux.HandleFunc("/api/stats", a.statsHandler)
+	mux.HandleFunc("/api/echo", a.echoHandler)
+	mux.HandleFunc("/api/posts", a.postsHandler)
+	mux.HandleFunc("/api/posts/", a.postByIDHandler)
+	return mux
+}
 
-	// Настраиваем HTTP сервер
-	port := ":8080"
-	server = &http.Server{
+// Start запускает HTTP-сервер
+func (a *App) Start(port string) error {
+	mux := a.SetupHTTP()
+
+	a.server = &http.Server{
 		Addr:         port,
 		Handler:      mux,
 		ReadTimeout:  15 * time.Second,
@@ -178,175 +426,94 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Канал для сигналов завершения
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-	// Запускаем сервер в горутине
 	go func() {
 		fmt.Printf("Go API сервер запущен на порту %s\n", port)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		a.running.Store(true)
+		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Ошибка сервера: %v", err)
 		}
 	}()
 
-	// Ожидаем сигнал завершения
 	sig := <-quit
 	fmt.Printf("\nПолучен сигнал %v. Завершение работы...\n", sig)
 
-	// Устанавливаем флаг shutdown
-	shutdownInProgress = 1
-
-	// Создаём context с timeout для graceful shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Пытаемся корректно завершить работу
-	if err := server.Shutdown(ctx); err != nil {
+	if err := a.server.Shutdown(ctx); err != nil {
 		log.Fatalf("Ошибка при завершении работы: %v", err)
 	}
 
+	a.running.Store(false)
 	fmt.Println("Сервер успешно завершил работу")
+	return nil
 }
 
-// initSamplePosts создаёт тестовые посты для демонстрации
-func initSamplePosts() {
-	now := time.Now()
-	samplePosts := []Post{
-		{
-			ID:        1,
-			Title:     "Введение в Go API",
-			Slug:      "introduction-to-go-api",
-			Content:   "Go (Golang) — это мощный язык программирования для создания высокопроизводительных API...",
-			Excerpt:   "Изучаем основы создания API на Go",
-			Author:    defaultAuthor,
-			Tags:      defaultTags,
-			ViewCount: 150,
-			PublishedAt: now.Add(-24 * time.Hour),
-			CreatedAt: now.Add(-48 * time.Hour),
-		},
-		{
-			ID:        2,
-			Title:     "Работа с JSON в Go",
-			Slug:      "working-with-json-in-go",
-			Content:   "Обработка JSON — одна из самых частых задач при разработке веб-сервисов...",
-			Excerpt:   "Полное руководство по encoding/json",
-			Author:    defaultAuthor,
-			Tags:      []Tag{{ID: 1, Name: "Go", Slug: "go"}, {ID: 4, Name: "JSON", Slug: "json"}},
-			ViewCount: 89,
-			PublishedAt: now.Add(-12 * time.Hour),
-			CreatedAt: now.Add(-24 * time.Hour),
-		},
-		{
-			ID:        3,
-			Title:     "Микросервисы: лучшие практики",
-			Slug:      "microservices-best-practices",
-			Content:   "При проектировании микросервисной архитектуры важно следовать определённым принципам...",
-			Excerpt:   "Советы по построению микросервисов",
-			Author:    defaultAuthor,
-			Tags:      []Tag{{ID: 2, Name: "Backend", Slug: "backend"}, {ID: 5, Name: "Architecture", Slug: "architecture"}},
-			ViewCount: 234,
-			PublishedAt: now.Add(-6 * time.Hour),
-			CreatedAt: now.Add(-12 * time.Hour),
-		},
-	}
+// --- Handlers ---
 
-	for _, post := range samplePosts {
-		posts[post.ID] = post
-	}
-	nextID = 4
-}
-
-// healthHandler проверяет статус сервера
-func healthHandler(w http.ResponseWriter, r *http.Request) {
+func (a *App) healthHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	incrementRequestCount()
+	a.counter.Increment()
 
-	response := HealthResponse{
+	writeJSON(w, http.StatusOK, HealthResponse{
 		Status:    "healthy",
 		Timestamp: time.Now().Format(time.RFC3339),
 		Version:   "1.0.0",
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	})
 }
 
-// statsHandler возвращает статистику запросов
-func statsHandler(w http.ResponseWriter, r *http.Request) {
+func (a *App) statsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	incrementRequestCount()
-
-	statsMu.RLock()
-	stats.Uptime = time.Since(startTime).String()
-	response := Stats{
-		RequestCount: stats.RequestCount,
-		Uptime:       stats.Uptime,
-		StartTime:    stats.StartTime,
-	}
-	statsMu.RUnlock()
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	a.counter.Increment()
+	writeJSON(w, http.StatusOK, a.counter.Get())
 }
 
-// echoHandler принимает JSON и возвращает его с обработкой
-func echoHandler(w http.ResponseWriter, r *http.Request) {
+func (a *App) echoHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	incrementRequestCount()
+	a.counter.Increment()
 
 	var req EchoRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
 
-	response := EchoResponse{
+	writeJSON(w, http.StatusOK, EchoResponse{
 		Original:  req,
 		Processed: fmt.Sprintf("Received: %s (processed by Go API)", req.Message),
 		Timestamp: time.Now().Format(time.RFC3339),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	})
 }
 
-func incrementRequestCount() {
-	statsMu.Lock()
-	defer statsMu.Unlock()
-	stats.RequestCount++
-}
-
-// postsHandler обрабатывает GET /api/posts (список) и POST /api/posts (создание)
-func postsHandler(w http.ResponseWriter, r *http.Request) {
+func (a *App) postsHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		getPostsHandler(w, r)
+		a.getPostsHandler(w, r)
 	case http.MethodPost:
-		createPostHandler(w, r)
+		a.createPostHandler(w, r)
 	default:
 		writeErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
 	}
 }
 
-// getPostsHandler возвращает список всех постов
-func getPostsHandler(w http.ResponseWriter, r *http.Request) {
-	incrementRequestCount()
+func (a *App) getPostsHandler(w http.ResponseWriter, r *http.Request) {
+	a.counter.Increment()
 
-	// Получаем параметры пагинации
 	query := r.URL.Query()
 	page, _ := strconv.Atoi(query.Get("page"))
 	perPage, _ := strconv.Atoi(query.Get("per_page"))
@@ -358,48 +525,19 @@ func getPostsHandler(w http.ResponseWriter, r *http.Request) {
 		perPage = 10
 	}
 
-	postsMu.RLock()
-	allPosts := make([]Post, 0, len(posts))
-	for _, post := range posts {
-		allPosts = append(allPosts, post)
-	}
-	postsMu.RUnlock()
+	paginatedPosts, total := a.store.GetAll(page, perPage)
 
-	// Сортировка по ID (новые первыми)
-	for i, j := 0, len(allPosts)-1; i < j; i, j = i+1, j-1 {
-		allPosts[i], allPosts[j] = allPosts[j], allPosts[i]
-	}
-
-	// Пагинация
-	total := len(allPosts)
-	start := (page - 1) * perPage
-	end := start + perPage
-
-	var paginatedPosts []Post
-	if start < total {
-		if end > total {
-			end = total
-		}
-		paginatedPosts = allPosts[start:end]
-	} else {
-		paginatedPosts = []Post{}
-	}
-
-	response := GetPostsResponse{
+	writeJSON(w, http.StatusOK, GetPostsResponse{
 		Posts:     paginatedPosts,
 		Total:     total,
 		Page:      page,
 		PerPage:   perPage,
 		Timestamp: time.Now().Format(time.RFC3339),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	})
 }
 
-// createPostHandler создаёт новый пост
-func createPostHandler(w http.ResponseWriter, r *http.Request) {
-	incrementRequestCount()
+func (a *App) createPostHandler(w http.ResponseWriter, r *http.Request) {
+	a.counter.Increment()
 
 	var req CreatePostRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -412,49 +550,37 @@ func createPostHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	postsMu.Lock()
-	id := nextID
-	nextID++
-
-	// Создаём теги из названий
-	tags := make([]Tag, 0, len(req.TagNames))
-	for i, name := range req.TagNames {
-		tags = append(tags, Tag{
-			ID:   int64(i + 1),
-			Name: name,
-			Slug: strings.ToLower(strings.ReplaceAll(name, " ", "-")),
-		})
+	now := time.Now()
+	defaultAuthor := &Author{
+		ID:        1,
+		Username:  "john_blogger",
+		Email:     "john@example.com",
+		Bio:       "Разработчик и технический писатель",
+		AvatarURL: "https://example.com/avatars/john.jpg",
 	}
 
 	post := Post{
-		ID:        id,
 		Title:     req.Title,
 		Slug:      strings.ToLower(strings.ReplaceAll(req.Title, " ", "-")),
 		Content:   req.Content,
 		Excerpt:   req.Excerpt,
 		Author:    defaultAuthor,
-		Tags:      tags,
+		Tags:      makeTagsFromNames(req.TagNames),
 		Comments:  []Comment{},
-		ViewCount: 0,
-		CreatedAt: time.Now(),
+		CreatedAt: now,
 	}
-	posts[id] = post
-	postsMu.Unlock()
 
-	response := CreatePostResponse{
+	id := a.store.Create(post)
+	post.ID = id
+
+	writeJSON(w, http.StatusCreated, CreatePostResponse{
 		Post:      post,
 		Message:   "Post created successfully",
 		Timestamp: time.Now().Format(time.RFC3339),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(response)
+	})
 }
 
-// postByIDHandler обрабатывает GET, PUT, DELETE для /api/posts/{id}
-func postByIDHandler(w http.ResponseWriter, r *http.Request) {
-	// Извлекаем ID из пути
+func (a *App) postByIDHandler(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/posts/")
 	id, err := strconv.ParseInt(path, 10, 64)
 	if err != nil {
@@ -464,147 +590,70 @@ func postByIDHandler(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		getPostByIDHandler(w, r, id)
+		a.getPostByIDHandler(w, r, id)
 	case http.MethodPut:
-		updatePostHandler(w, r, id)
+		a.updatePostHandler(w, r, id)
 	case http.MethodDelete:
-		deletePostHandler(w, r, id)
+		a.deletePostHandler(w, r, id)
 	default:
 		writeErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
 	}
 }
 
-// getPostByIDHandler возвращает пост по ID
-func getPostByIDHandler(w http.ResponseWriter, r *http.Request, id int64) {
-	incrementRequestCount()
+func (a *App) getPostByIDHandler(w http.ResponseWriter, r *http.Request, id int64) {
+	a.counter.Increment()
 
-	postsMu.RLock()
-	post, exists := posts[id]
-	postsMu.RUnlock()
-
-	if !exists {
+	post, updated := a.store.IncrementViewCount(id)
+	if !updated {
 		writeErrorResponse(w, http.StatusNotFound, "Post not found")
 		return
 	}
 
-	// Увеличиваем счётчик просмотров
-	postsMu.Lock()
-	post.ViewCount++
-	posts[id] = post
-	postsMu.Unlock()
-
-	response := PostResponse{
+	writeJSON(w, http.StatusOK, PostResponse{
 		Post:      post,
 		Timestamp: time.Now().Format(time.RFC3339),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	})
 }
 
-// updatePostHandler обновляет пост
-func updatePostHandler(w http.ResponseWriter, r *http.Request, id int64) {
-	incrementRequestCount()
+func (a *App) updatePostHandler(w http.ResponseWriter, r *http.Request, id int64) {
+	a.counter.Increment()
 
-	postsMu.RLock()
-	post, exists := posts[id]
-	postsMu.RUnlock()
-
-	if !exists {
+	if _, exists := a.store.GetByID(id); !exists {
 		writeErrorResponse(w, http.StatusNotFound, "Post not found")
 		return
 	}
 
-	var req CreatePostRequest
+	var req UpdatePostRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
 
-	postsMu.Lock()
-	if req.Title != "" {
-		post.Title = req.Title
-		post.Slug = strings.ToLower(strings.ReplaceAll(req.Title, " ", "-"))
-	}
-	if req.Content != "" {
-		post.Content = req.Content
-	}
-	if req.Excerpt != "" {
-		post.Excerpt = req.Excerpt
-	}
-	if len(req.TagNames) > 0 {
-		post.Tags = make([]Tag, 0, len(req.TagNames))
-		for i, name := range req.TagNames {
-			post.Tags = append(post.Tags, Tag{
-				ID:   int64(i + 1),
-				Name: name,
-				Slug: strings.ToLower(strings.ReplaceAll(name, " ", "-")),
-			})
-		}
-	}
-	post.UpdatedAt = time.Now()
-	posts[id] = post
-	postsMu.Unlock()
-
-	response := PostResponse{
-		Post:      post,
-		Timestamp: time.Now().Format(time.RFC3339),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
-}
-
-// deletePostHandler удаляет пост
-func deletePostHandler(w http.ResponseWriter, r *http.Request, id int64) {
-	incrementRequestCount()
-
-	postsMu.Lock()
-	_, exists := posts[id]
-	if !exists {
-		postsMu.Unlock()
+	updatedPost, ok := a.store.Update(id, req)
+	if !ok {
 		writeErrorResponse(w, http.StatusNotFound, "Post not found")
 		return
 	}
-	delete(posts, id)
-	postsMu.Unlock()
+
+	writeJSON(w, http.StatusOK, PostResponse{
+		Post:      updatedPost,
+		Timestamp: time.Now().Format(time.RFC3339),
+	})
+}
+
+func (a *App) deletePostHandler(w http.ResponseWriter, r *http.Request, id int64) {
+	a.counter.Increment()
+
+	if !a.store.Delete(id) {
+		writeErrorResponse(w, http.StatusNotFound, "Post not found")
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// writeErrorResponse записывает ответ с ошибкой
-func writeErrorResponse(w http.ResponseWriter, status int, message string) {
-	response := ErrorResponse{
-		Error:     http.StatusText(status),
-		Message:   message,
-		Timestamp: time.Now().Format(time.RFC3339),
-	}
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(response)
-}
-
-// isShuttingDown проверяет, идёт ли процесс завершения
-func isShuttingDown() bool {
-	return shutdownInProgress == 1
-}
-
-// GetServer возвращает текущий сервер (для тестов)
-func GetServer() *http.Server {
-	return server
-}
-
-// SetServer устанавливает сервер (для тестов)
-func SetServer(s *http.Server) {
-	server = s
-}
-
-// SetShutdownInProgress устанавливает флаг shutdown (для тестов)
-func SetShutdownInProgress(val int32) {
-	shutdownInProgress = val
-}
-
-// ResetShutdown сбрасывает флаг shutdown (для тестов)
-func ResetShutdown() {
-	shutdownInProgress = 0
+func main() {
+	app := NewApp()
+	app.Start(":8080")
 }

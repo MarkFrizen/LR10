@@ -143,7 +143,8 @@ def update_data(item_id: int, name: str = "", description: str = "", value: floa
         id=item_id,
         name=name,
         description=description,
-        value=value
+        value=value,
+        update_value=(value != 0.0)
     )
     return stub.UpdateData(request)
 

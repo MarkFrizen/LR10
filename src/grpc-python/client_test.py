@@ -233,12 +233,13 @@ class TestGRPCClientFunctions(unittest.TestCase):
             name="Updated",
             value=200.0
         )
-        
+
         self.mock_stub.UpdateData.assert_called_once()
         request = self.mock_stub.UpdateData.call_args[0][0]
         self.assertEqual(request.id, 1)
         self.assertEqual(request.name, "Updated")
         self.assertEqual(request.value, 200.0)
+        self.assertTrue(request.update_value)
 
     def test_delete_data(self):
         """Тестирует функцию delete_data."""

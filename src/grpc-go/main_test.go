@@ -238,10 +238,11 @@ func TestUpdateData(t *testing.T) {
 
 	// Обновляем элемент
 	updateResp, err := server.UpdateData(context.Background(), &pb.UpdateRequest{
-		Id:          createResp.Item.Id,
-		Name:        "Updated",
-		Description: "Updated description",
-		Value:       200.0,
+		Id:           createResp.Item.Id,
+		Name:         "Updated",
+		Description:  "Updated description",
+		Value:        200.0,
+		UpdateValue:  true,
 	})
 	if err != nil {
 		t.Fatalf("UpdateData() error = %v", err)

@@ -38,6 +38,7 @@ message UpdateRequest {
   string name = 2;
   string description = 3;
   double value = 4;
+  bool update_value = 5; // Флаг: обновлять ли значение
 }
 
 // Сообщение для удаления элемента

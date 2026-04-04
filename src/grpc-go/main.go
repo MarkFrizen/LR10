@@ -142,7 +142,9 @@ func (s *dataServer) UpdateData(ctx context.Context, req *pb.UpdateRequest) (*pb
 	if req.Description != "" {
 		item.Description = req.Description
 	}
-	item.Value = req.Value
+	if req.UpdateValue {
+		item.Value = req.Value
+	}
 	item.UpdatedAt = time.Now()
 
 	return &pb.DataResponse{
@@ -239,7 +241,7 @@ func main() {
 	// Создаём слукователь
 	lis, err := net.Listen("tcp", port)
 	if err != nil {
-		log.Fatalf("Не удалось запустить слукователь: %v", err)
+		log.Fatalf("Не удалось запустить слушатель: %v", err)
 	}
 
 	// Создаём gRPC-сервер
