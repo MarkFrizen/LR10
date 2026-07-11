@@ -157,3 +157,4 @@ docker-compose up go-api python-client
 - `GRPC_SERVER` - адрес gRPC-сервера (по умолчанию `localhost:50051`)
 - `BASE_URL` - адрес REST API (по умолчанию `http://localhost:8080`)
 # -1
+# -1
