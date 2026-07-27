@@ -158,3 +158,4 @@ docker-compose up go-api python-client
 - `BASE_URL` - адрес REST API (по умолчанию `http://localhost:8080`)
 # -1
 # -1
+# task2
